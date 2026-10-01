@@ -1,0 +1,46 @@
+{
+  "verifiedOn": "2026-10-01",
+  "cmakeVersion": "4.4.3",
+  "ninjaVersion": "1.13.2",
+  "gccVersion": "16.2.0",
+  "clangVersion": "23.1.2",
+  "gdbVersion": "17.2",
+  "aflVersion": "5.03c",
+  "sodiumVersion": "1.0.22",
+  "windowsToolkit": {
+    "version": "2.10.0",
+    "file": "w64devkit-x64-2.10.0.7z.exe",
+    "url": "https://github.com/skeeto/w64devkit/releases/download/v2.10.0/w64devkit-x64-2.10.0.7z.exe",
+    "sha256": "18d0a4c71a166f8401ab6305781bec5882b40b5e06ba9807c61cb5f3b3c6325e"
+  },
+  "cmakeLinux": {
+    "file": "cmake-4.4.3-linux-x86_64.tar.gz",
+    "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz",
+    "sha256": "d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc"
+  },
+  "cmakeWindows": {
+    "file": "cmake-4.4.3-windows-x86_64.zip",
+    "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-x86_64.zip",
+    "sha256": "4d52ebab7193a698651639ed80d8d04fd903358843572cf44c7fd234cb7c26ab"
+  },
+  "ninjaLinux": {
+    "file": "ninja-linux.zip",
+    "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip",
+    "sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6"
+  },
+  "sodiumWindows": {
+    "file": "libsodium-1.0.22-stable-mingw.tar.gz",
+    "url": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-mingw.tar.gz",
+    "sha256": "2dbb9fdb0882ec44a328b1f6a8fccbfa0bb0d0f5b1034f135e15827acaf6dba7"
+  },
+  "sodiumMsvc": {
+    "file": "libsodium-1.0.22-stable-msvc.zip",
+    "url": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip",
+    "sha256": "4b310d0602b6217d68b3000df19af595841ba101910af8d335096f9c45c9f36a"
+  },
+  "sodiumSource": {
+    "file": "libsodium-1.0.22-stable.tar.gz",
+    "url": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz",
+    "sha256": "25c47d0cbf804bf28f3a1166dc145ee013e31a8dc78bb0c9d74273fb44260567"
+  }
+}

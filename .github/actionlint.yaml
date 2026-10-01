@@ -1,0 +1,5 @@
+# Official hosted image added after actionlint 1.7.12's built-in runner list.
+# Source: https://github.com/actions/runner-images#available-images
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

@@ -1,0 +1,113 @@
+name: C build and tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-26.04
+    container: gcc:16.2.0-trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang-23]
+        preset: [debug, release, asan]
+    env:
+      CC: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bootstrap dependencies
+        run: apt-get update && apt-get install -y ca-certificates curl gnupg pkg-config
+      - name: Install current stable Clang from the official LLVM repository
+        if: matrix.compiler == 'clang-23'
+        run: |
+          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-key.asc
+          gpg --batch --yes --dearmor -o /usr/share/keyrings/llvm.gpg /tmp/llvm-key.asc
+          echo 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/trixie/ llvm-toolchain-trixie-23 main' > /etc/apt/sources.list.d/llvm.list
+          apt-get update
+          apt-get install -y clang-23 libclang-rt-23-dev
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.x'
+          check-latest: true
+      - name: Verify compiler and install pinned current build tools and libsodium
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          versions = json.loads(Path('toolchain.json').read_text())
+          output = subprocess.check_output([os.environ['CC'], '--version'], text=True)
+          expected = versions['gccVersion'] if os.environ['CC'] == 'gcc' else versions['clangVersion']
+          actual = re.search(r'(?:clang version |gcc \([^\n]*\) )(\d+\.\d+\.\d+)', output)
+          if actual is None or tuple(map(int, actual[1].split('.'))) < tuple(map(int, expected.split('.'))):
+              raise SystemExit(f'Compiler older than {expected}: {output}')
+          print(output)
+          PY
+          python scripts/bootstrap-linux.py
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+      - name: Build and smoke-test parser harness
+        if: matrix.preset == 'debug'
+        run: |
+          cmake -S . -B build/fuzz-smoke -G Ninja -DCVAULT_BUILD_FUZZER=ON -DBUILD_TESTING=OFF
+          cmake --build build/fuzz-smoke --parallel
+          ./build/fuzz-smoke/cvault-fuzz-parser < tests/fuzz/corpus/get.txt
+
+  windows:
+    runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, msvc]
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified current Windows toolchain and libsodium
+        shell: pwsh
+        run: |
+          ./scripts/bootstrap-windows.ps1 -SkipBuild -IncludeMsvc
+          $paths = Get-Content .deps/paths.json -Raw | ConvertFrom-Json
+          Add-Content $env:GITHUB_PATH $paths.binDirectory
+          Add-Content $env:GITHUB_PATH $paths.cmakeBinDirectory
+          Add-Content $env:GITHUB_ENV "CVAULT_MSVC_SODIUM_ROOT=$($paths.msvcSodiumRoot)"
+      - name: Configure GCC
+        if: matrix.compiler == 'gcc'
+        shell: pwsh
+        run: |
+          $preset = 'windows-clion-${{ matrix.configuration }}'.ToLower()
+          cmake --preset $preset
+      - name: Configure Visual Studio 2026
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: cmake -S . -B build/msvc -G "Visual Studio 18 2026" -A x64 "-DSODIUM_ROOT=$env:CVAULT_MSVC_SODIUM_ROOT"
+      - name: Build and test GCC
+        if: matrix.compiler == 'gcc'
+        shell: pwsh
+        run: |
+          $preset = 'windows-clion-${{ matrix.configuration }}'.ToLower()
+          cmake --build --preset $preset --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --preset $preset
+          exit $LASTEXITCODE
+      - name: Build and test MSVC
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          cmake --build build/msvc --config ${{ matrix.configuration }} --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build/msvc -C ${{ matrix.configuration }} --output-on-failure
+          exit $LASTEXITCODE

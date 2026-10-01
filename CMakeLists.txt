@@ -1,0 +1,72 @@
+cmake_minimum_required(VERSION 4.4.3)
+project(cvault VERSION 0.1.0 LANGUAGES C)
+
+if(MSVC)
+    # C17 is MSVC's latest supported stable C dialect; GCC/Clang use C23.
+    set(CMAKE_C_STANDARD 17)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+    set(CMAKE_C_STANDARD 23)
+endif()
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+
+option(CVAULT_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
+option(CVAULT_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan (Linux/macOS)" OFF)
+option(CVAULT_BUILD_FUZZER "Build the stdin parser harness (AFL++ compatible)" OFF)
+include(CTest)
+find_package(Sodium 1.0.22 REQUIRED)
+
+function(cvault_copy_runtime target)
+    if(Sodium_RUNTIME_DLL)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${Sodium_RUNTIME_DLL}" "$<TARGET_FILE_DIR:${target}>"
+            VERBATIM)
+    endif()
+endfunction()
+
+add_library(cvault_options INTERFACE)
+if(MSVC)
+    target_compile_options(cvault_options INTERFACE /W4)
+    if(CVAULT_WARNINGS_AS_ERRORS)
+        target_compile_options(cvault_options INTERFACE /WX)
+    endif()
+else()
+    target_compile_options(cvault_options INTERFACE -Wall -Wextra -Wpedantic)
+    if(CVAULT_WARNINGS_AS_ERRORS)
+        target_compile_options(cvault_options INTERFACE -Werror)
+    endif()
+endif()
+if(CVAULT_ENABLE_SANITIZERS)
+    if(WIN32 OR NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "ASan + UBSan preset requires GCC/Clang on Linux or macOS. Use a Linux/WSL toolchain.")
+    endif()
+    target_compile_options(cvault_options INTERFACE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(cvault_options INTERFACE -fsanitize=address,undefined)
+endif()
+
+configure_file(include/cvault/version.h.in generated/cvault/version.h @ONLY)
+add_library(cvault_core STATIC
+    src/common.c src/config.c src/hashtable.c src/parser.c
+    src/crypto.c src/auth.c src/persist.c src/audit.c src/server.c)
+target_include_directories(cvault_core PUBLIC include "${PROJECT_BINARY_DIR}/generated")
+target_link_libraries(cvault_core PRIVATE Sodium::Sodium cvault_options)
+
+add_executable(cvault-server src/main.c)
+target_link_libraries(cvault-server PRIVATE cvault_core cvault_options)
+cvault_copy_runtime(cvault-server)
+add_executable(cvault-cli client/main.c)
+target_link_libraries(cvault-cli PRIVATE cvault_core cvault_options)
+cvault_copy_runtime(cvault-cli)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+if(CVAULT_BUILD_FUZZER)
+    add_executable(cvault-fuzz-parser tests/fuzz/parser_stdin.c)
+    target_link_libraries(cvault-fuzz-parser PRIVATE cvault_core cvault_options)
+    cvault_copy_runtime(cvault-fuzz-parser)
+endif()

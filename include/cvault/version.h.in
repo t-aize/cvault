@@ -1,0 +1,6 @@
+#ifndef CVAULT_VERSION_H
+#define CVAULT_VERSION_H
+
+#define CVAULT_VERSION "@PROJECT_VERSION@"
+
+#endif

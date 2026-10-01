@@ -53,3 +53,22 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Local tools, dependency archives, generated builds and IDE state
+/.deps/
+/build/
+/cmake-build-*/
+/CMakeUserPresets.json
+/.idea/
+/compile_commands.json
+
+# Runtime data and secrets (never commit)
+/data/
+*.aof
+*.snapshot
+*.log
+*.key
+.env
+.env.*
+!.env.example
+/tests/fuzz/findings/
