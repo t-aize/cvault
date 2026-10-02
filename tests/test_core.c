@@ -30,16 +30,16 @@ int main(void) {
     CHECK(cv_auth_authorize(&session, "user:key", true) == CV_ERR_UNAUTHORIZED);
 
     cv_hashtable *table = NULL;
-    CHECK(cv_hashtable_create(&table) == CV_ERR_NOT_IMPLEMENTED && table == NULL);
+    CHECK(cv_hashtable_create(&table) == CV_OK && table != NULL);
     const unsigned char *value = secret;
     size_t value_length = sizeof(secret);
-    CHECK(cv_hashtable_get(table, "key", &value, &value_length) == CV_ERR_NOT_IMPLEMENTED);
+    CHECK(cv_hashtable_get(table, "key", &value, &value_length) == CV_ERR_NOT_FOUND);
     CHECK(value == NULL && value_length == 0);
-    CHECK(cv_hashtable_set(table, "key", secret, sizeof(secret)) == CV_ERR_NOT_IMPLEMENTED);
-    CHECK(cv_hashtable_delete(table, "key") == CV_ERR_NOT_IMPLEMENTED);
-    cv_hashtable_destroy(table);
+    CHECK(cv_hashtable_set(table, "key", secret, sizeof(secret)) == CV_OK);
+    CHECK(cv_hashtable_delete(table, "key") == CV_OK);
     CHECK(cv_persist_replay("./data", table) == CV_ERR_NOT_IMPLEMENTED);
     CHECK(cv_persist_snapshot("./data", table) == CV_ERR_NOT_IMPLEMENTED);
+    cv_hashtable_destroy(table);
     CHECK(cv_audit_record("GET", CV_ERR_UNAUTHORIZED) == CV_ERR_NOT_IMPLEMENTED);
 
     cv_command command;

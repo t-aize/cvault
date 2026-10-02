@@ -1,8 +1,14 @@
 # Security notes and implementation work
 
-The scaffold has no usable data store, authentication mechanism or TCP listener.
-It initializes libsodium, can wipe buffers and defaults the planned listener to
-`127.0.0.1:6380`. Authentication placeholders cannot grant access.
+The in-memory core supports bounded binary values, keyed SipHash, expiration and
+secure wiping of owned keys/values before release. Values remain plaintext in
+process memory; memory is not locked against swapping. Expired entries are hidden
+immediately, but read-only lookups do not wipe them: periodic sweeps must be scheduled
+by the future event loop. See [the core contracts](core.md).
+
+There is no authentication mechanism, encrypted persistence or TCP listener yet.
+The planned listener defaults to `127.0.0.1:6380`. Authentication placeholders
+cannot grant access.
 Neither build success nor the dependency roundtrip test proves application security.
 
 Before implementing the planned modules:

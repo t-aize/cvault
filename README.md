@@ -3,8 +3,9 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Current status: buildable project scaffold.** CMake, CLion setup, libsodium,
-> tests and CI definitions are ready. Storage, networking, command parsing,
+> **Current status: in-memory core implemented; server/client scaffold.** The hash
+> table supports SET, GET, DEL, EXPIRE and TTL through its C API. CMake, CLion,
+> libsodium, tests and CI definitions are ready. Networking, command parsing,
 > encryption wrappers and persistence remain to be implemented. The server and
 > client print help/version information; normal execution exits with an explicit
 > `not implemented` error. No listening socket or data file is created.
@@ -98,8 +99,8 @@ On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault
 | Setup | C23/C17, CMake presets, current toolchain, CLion bootstrap, strict warnings | ✅ |
 | Setup | libsodium initialization and secure buffer wiping | ✅ |
 | Setup | CTest smoke tests, AFL++ harness and CI definitions | ✅ |
-| Core | Hash table, collisions, resizing | 🚧 |
-| Core | `SET`, `GET`, `DEL`, `EXPIRE`, `TTL` | 🚧 |
+| Core | Hash table, collisions, resizing | ✅ |
+| Core | `SET`, `GET`, `DEL`, `EXPIRE`, `TTL` (in-memory C API) | ✅ |
 | Network | TCP server, multiple clients (`poll` / `epoll`) | 🚧 |
 | Persistence | Append-only log replayed at startup | 🚧 |
 | Persistence | Snapshots (POSIX `fork`, Windows backend to design) | 🚧 |
@@ -111,6 +112,11 @@ On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault
 | Data protection | Compaction, automatic expiry and per-user export | 🚧 |
 
 ## Architecture
+
+See the [in-memory core guide](docs/core.md) for API contracts, expiration rules,
+memory ownership, examples, complexity and test coverage. The five operations
+are implemented in the storage API; text command dispatch and TCP access remain
+planned.
 
 ```text
 CLI <-- TCP text protocol --> network loop
@@ -193,7 +199,10 @@ These are educational design goals, not a claim of GDPR compliance.
 
 ## Testing and roadmap
 
-Current tests check module linkage, safe scaffold behavior, parser input bounds,
+Current tests cover the hash table's binary values, ownership, input bounds,
+collisions, resizing, expiration, clock failures and allocation rollback. A private
+test build forces collisions and checks that key/value allocations are wiped before
+freeing. Other tests check module linkage, safe scaffold behavior, parser input bounds,
 libsodium initialization, an XChaCha20-Poly1305 dependency roundtrip and tamper rejection.
 Checks remain enabled in Release builds. They do not validate unimplemented features.
 
@@ -205,13 +214,12 @@ setup-python **7.0.0** use explicit version tags; Dependabot checks
 GitHub Actions daily. Remote CI execution requires pushing the repository.
 The parser harness can be built now; see [fuzzing instructions](docs/fuzzing.md).
 
-1. Hash table + collision/resizing/TTL tests.
-2. Protocol specification and parser + negative/boundary tests.
-3. TCP server, single client, then multiple clients.
-4. Versioned append-only format and crash-safe replay.
-5. Encryption/key management and authentication.
-6. Audit log, prefix ACLs, export, purge and compaction.
-7. Full fuzzing campaigns, Valgrind, benchmarks and snapshots.
+1. Protocol specification and parser + negative/boundary tests.
+2. TCP server, single client, then multiple clients; schedule expired-entry sweeps.
+3. Versioned append-only format and crash-safe replay.
+4. Encryption/key management and authentication.
+5. Audit log, prefix ACLs, export, purge and compaction.
+6. Full fuzzing campaigns, Valgrind, benchmarks and snapshots.
 
 ## License
 
