@@ -59,8 +59,18 @@ See Microsoft's [binary compatibility documentation](https://learn.microsoft.com
    minimum version requirement.
 4. Reload CMake and select `windows-clion-debug` or `windows-clion-release`.
 5. Build `cvault-server`, `cvault-cli` or the tests. Add `--help` or `--version`
-   to executable run arguments to try the scaffold.
+   to executable run arguments to inspect help/version without starting the server.
 6. Run CTest, or the `cvault-test-core` and `cvault-test-sodium` targets.
+
+`cvault-server` now runs a TCP listener by default. Use `--port 0` for an ephemeral
+port during development, and Ctrl+C to stop it. See [network.md](network.md) for
+transport behavior and the pending authenticated command layer.
+
+TCP integration tests use Python 3.12+ (standard library only). If CMake cannot
+find Python, pass `-DPython3_EXECUTABLE=/absolute/path/to/python` and reload.
+`-DCVAULT_REQUIRE_NETWORK_TESTS=ON` makes its absence a configuration error; CI
+enables this option. Without Python, the C network API tests still run and CMake
+reports that the TCP integration tests are skipped.
 
 If presets are not imported automatically, use a Ninja profile with the C compiler
 and Ninja paths from `.deps/paths.json`. CMake automatically finds the matching

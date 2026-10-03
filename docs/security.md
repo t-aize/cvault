@@ -6,9 +6,11 @@ process memory; memory is not locked against swapping. Expired entries are hidde
 immediately, but read-only lookups do not wipe them: periodic sweeps must be scheduled
 by the future event loop. See [the core contracts](core.md).
 
-There is no authentication mechanism, encrypted persistence or TCP listener yet.
-The planned listener defaults to `127.0.0.1:6380`. Authentication placeholders
-cannot grant access.
+The nonblocking TCP listener defaults to `127.0.0.1:6380`. It implements only
+PING/QUIT probes and rejects storage/authentication commands. There is no
+authentication mechanism or encrypted persistence yet. Authentication placeholders
+cannot grant access. The transport bounds buffers/connections, applies frame/idle
+timeouts and wipes client buffers on release; it does not provide TLS or rate limiting.
 Neither build success nor the dependency roundtrip test proves application security.
 
 Before implementing the planned modules:

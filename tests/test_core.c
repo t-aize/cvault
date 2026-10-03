@@ -18,7 +18,8 @@ int main(void) {
     cv_server_config config = cv_server_config_default();
     CHECK(strcmp(config.bind_address, "127.0.0.1") == 0);
     CHECK(config.port == 6380 && config.max_clients == CV_MAX_CLIENTS);
-    CHECK(cv_server_run(&config) == CV_ERR_NOT_IMPLEMENTED);
+    config.max_clients = 0;
+    CHECK(cv_server_run(&config) == CV_ERR_INVALID_ARGUMENT);
     CHECK(cv_server_run(NULL) == CV_ERR_INVALID_ARGUMENT);
 
     cv_auth_session session;

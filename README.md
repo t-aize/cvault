@@ -3,12 +3,12 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Current status: in-memory core implemented; server/client scaffold.** The hash
+> **Current status: in-memory core and TCP transport implemented.** The hash
 > table supports SET, GET, DEL, EXPIRE and TTL through its C API. CMake, CLion,
-> libsodium, tests and CI definitions are ready. Networking, command parsing,
-> encryption wrappers and persistence remain to be implemented. The server and
-> client print help/version information; normal execution exits with an explicit
-> `not implemented` error. No listening socket or data file is created.
+> libsodium, tests and CI definitions are ready. The server handles multiple clients,
+> PING/QUIT probes, bounded framing and graceful shutdown. Storage command dispatch,
+> authentication, encryption and persistence remain to be implemented. The CLI is
+> still a scaffold. The server binds to localhost by default and creates no data files.
 
 ## Why this project?
 
@@ -90,7 +90,16 @@ For a custom dependency installation, pass `-DSODIUM_ROOT=/path/to/libsodium`.
 ```
 
 On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault-cli`.
-`--port`, `--data`, connections and interactive commands are planned, not accepted yet.
+The server accepts connections and configuration options:
+
+```powershell
+.\cmake-build-debug\cvault-server.exe --bind 127.0.0.1 --port 6380 --backend auto
+```
+
+Send `PING\n` to receive `+PONG\n`, or `QUIT\n` to receive `+OK\n` followed by closure.
+Storage commands are rejected until command dispatch/authentication are implemented.
+See the [TCP transport guide](docs/network.md) for options, embedding and tests.
+`--data` and interactive CLI commands are still planned.
 
 ## Features
 
@@ -101,7 +110,7 @@ On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault
 | Setup | CTest smoke tests, AFL++ harness and CI definitions | ✅ |
 | Core | Hash table, collisions, resizing | ✅ |
 | Core | `SET`, `GET`, `DEL`, `EXPIRE`, `TTL` (in-memory C API) | ✅ |
-| Network | TCP server, multiple clients (`poll` / `epoll`) | 🚧 |
+| Network | TCP server, multiple clients (`poll` / `epoll`, Windows `WSAPoll`) | ✅ |
 | Persistence | Append-only log replayed at startup | 🚧 |
 | Persistence | Snapshots (POSIX `fork`, Windows backend to design) | 🚧 |
 | Security | Encryption at rest (XChaCha20-Poly1305) | 🚧 |
@@ -115,8 +124,8 @@ On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault
 
 See the [in-memory core guide](docs/core.md) for API contracts, expiration rules,
 memory ownership, examples, complexity and test coverage. The five operations
-are implemented in the storage API; text command dispatch and TCP access remain
-planned.
+are implemented in the storage API; authenticated text command dispatch remains
+planned. The [TCP transport](docs/network.md) already handles connections and frames.
 
 ```text
 CLI <-- TCP text protocol --> network loop
@@ -206,6 +215,11 @@ freeing. Other tests check module linkage, safe scaffold behavior, parser input 
 libsodium initialization, an XChaCha20-Poly1305 dependency roundtrip and tamper rejection.
 Checks remain enabled in Release builds. They do not validate unimplemented features.
 
+Network tests exercise real TCP sockets: concurrency, frame fragmentation/pipelining,
+partial writes, slow-reader isolation, half-closes, resets, connection limits,
+IPv4/IPv6, timeouts, callback failures and bounded shutdown. Python 3.12+ enables
+the integration suite; CI requires it. Linux runs both poll and epoll, Windows WSAPoll.
+
 CI uses Ubuntu 26.04 runners with the official GCC 16.2.0 container and Clang 23
 from LLVM's repository, testing Debug, Release and ASan/UBSan. Windows Server 2025
 with Visual Studio 2026 tests GCC and MSVC in Debug and Release. Build tools and
@@ -215,7 +229,7 @@ GitHub Actions daily. Remote CI execution requires pushing the repository.
 The parser harness can be built now; see [fuzzing instructions](docs/fuzzing.md).
 
 1. Protocol specification and parser + negative/boundary tests.
-2. TCP server, single client, then multiple clients; schedule expired-entry sweeps.
+2. Authenticated command dispatch and CLI integration; schedule expired-entry sweeps.
 3. Versioned append-only format and crash-safe replay.
 4. Encryption/key management and authentication.
 5. Audit log, prefix ACLs, export, purge and compaction.

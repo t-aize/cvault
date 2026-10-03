@@ -54,6 +54,9 @@ add_library(cvault_core STATIC
     src/crypto.c src/auth.c src/persist.c src/audit.c src/server.c)
 target_include_directories(cvault_core PUBLIC include "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(cvault_core PRIVATE Sodium::Sodium cvault_options)
+if(WIN32)
+    target_link_libraries(cvault_core PRIVATE ws2_32)
+endif()
 
 add_executable(cvault-server src/main.c)
 target_link_libraries(cvault-server PRIVATE cvault_core cvault_options)
