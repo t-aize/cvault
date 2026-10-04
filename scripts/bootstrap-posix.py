@@ -10,6 +10,8 @@ import shlex
 import stat
 import subprocess
 import tarfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -25,9 +27,29 @@ def download(spec):
     if not archive.exists():
         print(f"Downloading {spec['file']}...", flush=True)
         request = urllib.request.Request(spec["url"], headers={"User-Agent": "cvault-bootstrap"})
-        with urllib.request.urlopen(request, timeout=120) as response, archive.open("wb") as output:
-            while block := response.read(1024 * 1024):
-                output.write(block)
+        temporary = archive.with_name(archive.name + ".part")
+        try:
+            for attempt in range(5):
+                try:
+                    with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+                        while block := response.read(1024 * 1024):
+                            output.write(block)
+                    break
+                except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                    temporary.unlink(missing_ok=True)
+                    if (isinstance(error, urllib.error.HTTPError) and error.code not in
+                        (408, 429, 500, 502, 503, 504)) or attempt == 4:
+                        raise
+                    delay = 2 ** (attempt + 1)
+                    print(f"Download attempt {attempt + 1} failed; retrying in {delay}s: {error}", flush=True)
+                    time.sleep(delay)
+            with temporary.open("rb") as source:
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+            if digest != spec["sha256"]:
+                raise RuntimeError(f"Archive checksum mismatch: {archive}. Nothing was extracted.")
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     if digest != spec["sha256"]:
@@ -50,6 +72,13 @@ def main():
     macos = system == "Darwin"
     platform_key = "Macos" if macos else "Linux"
     platform_name = "macos" if macos else "linux"
+    sdk = None
+    if macos:
+        # The resolved Xcode clang binary does not necessarily discover its SDK.
+        # Give Autoconf and CMake the same explicit native macOS SDK.
+        sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+        if not Path(sdk).is_dir():
+            raise RuntimeError(f"Missing macOS SDK: {sdk}")
     cmake_parent = DEPS / "tools"
     cmake_root = cmake_parent / (f"cmake-{VERSIONS['cmakeVersion']}-" + ("macos-universal" if macos else "linux-x86_64"))
     cmake_bin = cmake_root / ("CMake.app/Contents/bin" if macos else "bin")
@@ -78,6 +107,9 @@ def main():
         environment = os.environ.copy()
         # Only project targets are instrumented; build the crypto dependency normally.
         environment["CFLAGS"] = "-O2"
+        if sdk:
+            environment["SDKROOT"] = sdk
+            environment["CFLAGS"] += " -isysroot " + shlex.quote(sdk)
         environment.pop("LDFLAGS", None)
         for command in (
             ["sh", "configure", f"--prefix={sodium_prefix}", "--disable-shared"],
@@ -85,13 +117,23 @@ def main():
             ["make", "check"],
             ["make", "install"],
         ):
-            subprocess.run(command, cwd=source_root, env=environment, check=True)
+            try:
+                subprocess.run(command, cwd=source_root, env=environment, check=True)
+            except subprocess.CalledProcessError:
+                # Autoconf's summary hides the compiler/linker error. Preserve the
+                # diagnostic in CI logs without requiring another run to retrieve it.
+                diagnostic = source_root / "config.log"
+                if diagnostic.exists():
+                    print(diagnostic.read_text(errors="replace"), flush=True)
+                raise
 
     executable_paths = [str(cmake_bin), str(ninja_root)]
     exports = {
         "PATH": os.pathsep.join(executable_paths) + os.pathsep + os.environ.get("PATH", ""),
         "SODIUM_ROOT": str(sodium_prefix),
     }
+    if sdk:
+        exports["SDKROOT"] = sdk
     for executable, expected in ((cmake_bin / "cmake", VERSIONS["cmakeVersion"]), (ninja_root / "ninja", VERSIONS["ninjaVersion"])):
         actual = subprocess.check_output([str(executable), "--version"], text=True)
         if expected not in actual.splitlines()[0]:
@@ -103,7 +145,9 @@ def main():
             target.write("\n".join(executable_paths) + "\n")
     if os.environ.get("GITHUB_ENV"):
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as target:
-            target.write(f"SODIUM_ROOT={sodium_prefix}\n")
+            for key in ("SODIUM_ROOT", "SDKROOT"):
+                if key in exports:
+                    target.write(f"{key}={exports[key]}\n")
     print(f"Setup complete. Run: source {shlex.quote(str(environment_file))}", flush=True)
 
 

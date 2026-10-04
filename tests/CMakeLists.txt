@@ -45,8 +45,18 @@ target_link_libraries(cvault-test-persistence-codec PRIVATE cvault_core cvault_o
 cvault_copy_runtime(cvault-test-persistence-codec)
 add_test(NAME persistence_codec COMMAND cvault-test-persistence-codec)
 set_tests_properties(persistence_codec PROPERTIES TIMEOUT 15)
+if(WIN32)
+    find_program(CVAULT_POWERSHELL NAMES pwsh powershell REQUIRED)
+    add_test(NAME bootstrap_windows_download
+        COMMAND "${CVAULT_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_bootstrap_windows.ps1")
+    set_tests_properties(bootstrap_windows_download PROPERTIES TIMEOUT 30)
+endif()
 find_package(Python3 3.12 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME bootstrap_download
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_bootstrap.py")
+    set_tests_properties(bootstrap_download PROPERTIES TIMEOUT 15)
     add_test(NAME persistence
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_persistence.py"
             --fixture "$<TARGET_FILE:cvault-persistence-fixture>"

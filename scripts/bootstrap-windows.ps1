@@ -26,14 +26,26 @@ function Get-VerifiedArchive($specification) {
     $archivePath = Join-Path $downloadDirectory $specification.file
     if (-not (Test-Path -LiteralPath $archivePath)) {
         Write-Host "Downloading $($specification.file)..."
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
+        # Do not expose incomplete downloads as cached archives. DNS/HTTP failures
+        # on hosted runners need time to recover; immediate retries are ineffective.
+        $partialPath = "$archivePath.part"
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
             try {
-                Invoke-WebRequest -Uri $specification.url -OutFile $archivePath -UseBasicParsing
+                Invoke-WebRequest -Uri $specification.url -OutFile $partialPath -UseBasicParsing
                 break
             } catch {
-                if ($attempt -eq 3) { throw }
+                if (Test-Path -LiteralPath $partialPath) { Remove-Item -LiteralPath $partialPath }
+                if ($attempt -eq 5) { throw }
+                $delaySeconds = [int][math]::Pow(2, $attempt)
+                Write-Warning "Download attempt $attempt failed; retrying in $delaySeconds seconds."
+                Start-Sleep -Seconds $delaySeconds
             }
         }
+        if ((Get-FileHash -LiteralPath $partialPath -Algorithm SHA256).Hash -ne $specification.sha256) {
+            Remove-Item -LiteralPath $partialPath
+            throw "Archive checksum mismatch: $archivePath. Nothing was extracted."
+        }
+        Move-Item -LiteralPath $partialPath -Destination $archivePath
     }
     if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -ne $specification.sha256) {
         throw "Archive checksum mismatch: $archivePath. Nothing was extracted."

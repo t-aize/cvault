@@ -163,7 +163,10 @@ Use `CC="$(xcrun --find clang)"` with a fresh build directory to test Apple's
 compiler. The bootstrap downloads universal CMake 4.4.3 and Ninja 1.13.2, checks
 their hashes, builds native static libsodium, runs its `make check`, and writes
 `.deps/env.sh`. It does not install/upgrade the compiler. Homebrew commands above
-provision the latest stable LLVM; CI checks it against `toolchain.json`.
+provision the latest stable LLVM. The bootstrap resolves the native macOS SDK
+with `xcrun`, passes `-isysroot` to libsodium's Autoconf build, and exports `SDKROOT`
+for subsequent CMake configuration. Compiler failures print `config.log` in CI.
+CI checks LLVM against `toolchain.json`.
 macOS uses poll and the POSIX fork snapshot backend; epoll is Linux-only.
 
 ## Updating version pins
@@ -171,6 +174,9 @@ macOS uses poll and the POSIX fork snapshot backend; epoll is Linux-only.
 GitHub Actions use explicit release tags, as requested. Dependabot checks those
 actions daily and proposes version updates after the configuration is pushed.
 Tool versions and archive hashes are a reviewed snapshot, not floating downloads.
+Downloads use bounded retries with exponential delays for transient failures and
+publish cached archives only after checksum verification. Incomplete downloads
+are removed; checksum mismatches still fail closed.
 Stable libsodium archive URLs can change: a fresh download with a changed hash is
 rejected until the new archive is verified and its pin updated.
 
