@@ -230,12 +230,58 @@ static int resizing_and_sweeping(void) {
     return EXIT_SUCCESS;
 }
 
+typedef struct { size_t count, expired; uint64_t remaining; cv_status status; } visit_result;
+static cv_status count_entry(void *opaque, const char *key, const unsigned char *value,
+    size_t length, bool expires, uint64_t remaining) {
+    (void)key; (void)value; (void)length;
+    visit_result *result = opaque;
+    ++result->count;
+    if (expires && remaining == 0) ++result->expired;
+    if (expires) result->remaining = remaining;
+    return result->status;
+}
+static int persistence_helpers(void) {
+    fake_time time = {100, CV_OK};
+    cv_hashtable *table = NULL, *copy = NULL;
+    CHECK(cv_hashtable_create_with_clock(&table, fake_clock, &time) == CV_OK);
+    CHECK(cv_hashtable_set(table, "key", (const unsigned char *)"secret", 6) == CV_OK);
+    CHECK(cv_hashtable_expire_ms(table, "key", 1500) == CV_OK);
+    time.now = 600;
+    CHECK(cv_hashtable_clone(table, &copy) == CV_OK);
+    CHECK(cv_hashtable_set(table, "key", NULL, 0) == CV_OK);
+    const unsigned char *value; size_t length;
+    CHECK(cv_hashtable_get(copy, "key", &value, &length) == CV_OK);
+    CHECK(length == 6 && memcmp(value, "secret", 6) == 0);
+    visit_result result = {0, 0, 0, CV_OK};
+    CHECK(cv_hashtable_visit(copy, false, count_entry, &result) == CV_OK);
+    CHECK(result.count == 1 && result.remaining == 1000);
+    CHECK(cv_hashtable_expire_ms(copy, "key", UINT64_MAX) == CV_ERR_LIMIT);
+    time.now = 1600;
+    CHECK(cv_hashtable_get(copy, "key", &value, &length) == CV_ERR_NOT_FOUND);
+    result = (visit_result){0, 0, 0, CV_OK};
+    CHECK(cv_hashtable_visit(copy, false, count_entry, &result) == CV_OK && result.count == 0);
+    CHECK(cv_hashtable_visit(copy, true, count_entry, &result) == CV_OK);
+    CHECK(result.count == 1 && result.expired == 1 && result.remaining == 0);
+    result.status = CV_ERR_IO;
+    CHECK(cv_hashtable_visit(copy, true, count_entry, &result) == CV_ERR_IO);
+    time.status = CV_ERR_IO;
+    cv_hashtable *failed = copy;
+    CHECK(cv_hashtable_clone(copy, &failed) == CV_ERR_IO && failed == NULL);
+    CHECK(cv_hashtable_visit(copy, true, count_entry, &result) == CV_ERR_IO);
+    CHECK(cv_hashtable_expire_ms(copy, "key", 10) == CV_ERR_IO);
+    CHECK(cv_hashtable_clone(NULL, &failed) == CV_ERR_INVALID_ARGUMENT && failed == NULL);
+    CHECK(cv_hashtable_visit(table, false, NULL, NULL) == CV_ERR_INVALID_ARGUMENT);
+    cv_hashtable_destroy(copy); cv_hashtable_destroy(table);
+    return EXIT_SUCCESS;
+}
+
 int main(void) {
     CHECK(invalid_arguments() == EXIT_SUCCESS);
     CHECK(ownership_and_bounds() == EXIT_SUCCESS);
     CHECK(expiration() == EXIT_SUCCESS);
     CHECK(clock_errors() == EXIT_SUCCESS);
     CHECK(resizing_and_sweeping() == EXIT_SUCCESS);
+    CHECK(persistence_helpers() == EXIT_SUCCESS);
     puts("Hash table: ownership, binary values, bounds, resizing and expiration verified.");
     return EXIT_SUCCESS;
 }

@@ -10,7 +10,9 @@ typedef enum {
     CV_ERR_CRYPTO,
     CV_ERR_UNAUTHORIZED,
     CV_ERR_IO,
-    CV_ERR_LIMIT
+    CV_ERR_LIMIT,
+    CV_ERR_CORRUPT,
+    CV_ERR_BUSY
 } cv_status;
 
 const char *cv_status_string(cv_status status);

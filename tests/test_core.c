@@ -38,9 +38,20 @@ int main(void) {
     CHECK(value == NULL && value_length == 0);
     CHECK(cv_hashtable_set(table, "key", secret, sizeof(secret)) == CV_OK);
     CHECK(cv_hashtable_delete(table, "key") == CV_OK);
-    CHECK(cv_persist_replay("./data", table) == CV_ERR_NOT_IMPLEMENTED);
-    CHECK(cv_persist_snapshot("./data", table) == CV_ERR_NOT_IMPLEMENTED);
     cv_hashtable_destroy(table);
+    cv_persist *store = (cv_persist *)&config;
+    CHECK(cv_persist_open(NULL, &store) == CV_ERR_INVALID_ARGUMENT && store == NULL);
+    CHECK(cv_persist_open(NULL, NULL) == CV_ERR_INVALID_ARGUMENT);
+    CHECK(cv_persist_close(NULL) == CV_OK);
+    value = secret; value_length = sizeof(secret);
+    CHECK(cv_persist_get(NULL, "key", &value, &value_length) == CV_ERR_INVALID_ARGUMENT);
+    CHECK(value == NULL && value_length == 0);
+    int64_t ttl = 100;
+    CHECK(cv_persist_ttl(NULL, "key", &ttl) == CV_ERR_INVALID_ARGUMENT && ttl == CV_TTL_MISSING);
+    CHECK(cv_persist_set(NULL, "key", NULL, 0) == CV_ERR_INVALID_ARGUMENT);
+    CHECK(cv_persist_snapshot(NULL) == CV_ERR_INVALID_ARGUMENT);
+    bool done = true;
+    CHECK(cv_persist_snapshot_poll(NULL, &done) == CV_ERR_INVALID_ARGUMENT && !done);
     CHECK(cv_audit_record("GET", CV_ERR_UNAUTHORIZED) == CV_ERR_NOT_IMPLEMENTED);
 
     cv_command command;

@@ -51,11 +51,11 @@ endif()
 configure_file(include/cvault/version.h.in generated/cvault/version.h @ONLY)
 add_library(cvault_core STATIC
     src/common.c src/config.c src/hashtable.c src/parser.c
-    src/crypto.c src/auth.c src/persist.c src/audit.c src/server.c)
+    src/crypto.c src/auth.c src/persist.c src/persist_codec.c src/persist_io.c src/audit.c src/server.c)
 target_include_directories(cvault_core PUBLIC include "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(cvault_core PRIVATE Sodium::Sodium cvault_options)
 if(WIN32)
-    target_link_libraries(cvault_core PRIVATE ws2_32)
+    target_link_libraries(cvault_core PRIVATE ws2_32 advapi32)
 endif()
 
 add_executable(cvault-server src/main.c)

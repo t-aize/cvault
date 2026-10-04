@@ -8,7 +8,8 @@ AUTO selects epoll on Linux and the available poll backend elsewhere. Explicit
 epoll on a non-Linux platform returns `CV_ERR_NOT_IMPLEMENTED`.
 
 The transport is operational. Authentication, command grammar/dispatch, database
-access and persistence are separate, unfinished modules. The default handler exposes
+access are separate, unfinished modules. Encrypted persistence is available through
+its C API and server startup options; see [persistence](persistence.md). The default handler exposes
 only PING/QUIT probes; it never reads or writes the hash table.
 
 ## Running the server
@@ -38,8 +39,10 @@ so IPv4 requires a separate server instance. Bind failure exits with status 1.
 | `--shutdown-timeout-ms` | `2000` | 1..INT_MAX |
 
 Numeric arguments reject signs, whitespace, overflow and trailing characters.
-`--help` and `--version` exit successfully without opening sockets. `--data` is
-not supported because the transport does not implement persistence.
+`--help` and `--version` exit successfully without opening sockets. The executable
+also accepts `--data`, `--key-file`, `--generate-key` and `--snapshot-interval-ms`;
+see [persistence](persistence.md). Recovery completes before bind/listen, and
+a corrupt database prevents readiness. The probe handler still never accesses storage.
 
 ## Current wire behavior
 

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "cvault/common.h"
 
 /** @file
@@ -86,5 +87,24 @@ cv_status cv_hashtable_purge_expired(cv_hashtable *table, size_t *removed);
 
 /** Read physical counts without allocation/clock access. Resets output on error. */
 cv_status cv_hashtable_get_stats(const cv_hashtable *table, cv_hashtable_stats *out);
+
+/** Millisecond version of EXPIRE; zero deletes. Overflow preserves the entry. */
+cv_status cv_hashtable_expire_ms(cv_hashtable *table, const char *key, uint64_t milliseconds);
+
+/** Visit entries using one clock reading. No mutation/reentry into this table is
+ * allowed during visitation. Slices are borrowed. With include_expired=true,
+ * expired physical entries are included with expires=true and remaining_ms=0.
+ * Callback errors stop traversal. This preserves history for snapshot replay.
+ */
+typedef cv_status (*cv_hashtable_visitor)(void *context, const char *key,
+    const unsigned char *value, size_t length, bool expires, uint64_t remaining_ms);
+cv_status cv_hashtable_visit(const cv_hashtable *table, bool include_expired,
+                             cv_hashtable_visitor visitor, void *context);
+
+/** Deep-copy live entries, preserving exact monotonic deadlines and borrowed
+ * clock/context. Resets *out on failure. The context must outlive both tables.
+ * O(buckets + entries + copied bytes); failed cloning leaves the source unchanged.
+ */
+cv_status cv_hashtable_clone(const cv_hashtable *table, cv_hashtable **out);
 
 #endif

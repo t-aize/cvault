@@ -8,7 +8,9 @@ by the future event loop. See [the core contracts](core.md).
 
 The nonblocking TCP listener defaults to `127.0.0.1:6380`. It implements only
 PING/QUIT probes and rejects storage/authentication commands. There is no
-authentication mechanism or encrypted persistence yet. Authentication placeholders
+client authentication mechanism yet. Encrypted persistence is implemented with
+XChaCha20-Poly1305; see [persistence](persistence.md) for key provisioning, permissions,
+replay, durability, metadata leakage and rollback limitations. Authentication placeholders
 cannot grant access. The transport bounds buffers/connections, applies frame/idle
 timeouts and wipes client buffers on release; it does not provide TLS or rate limiting.
 Neither build success nor the dependency roundtrip test proves application security.
@@ -23,9 +25,9 @@ Before implementing the planned modules:
   default passwords or command-line secrets. Bound costly authentication work.
 - Design key provisioning, permissions, rotation and recovery. Never commit
   passwords, real test secrets, encryption keys or runtime data.
-- Use fresh XChaCha20-Poly1305 nonces and authenticated metadata. Verify tags
-  before exposing plaintext. Define a versioned record format before persistence.
-- Design crash recovery, durability, atomic compaction and snapshot consistency.
+- Preserve fresh nonces, authenticated metadata and tag verification in the
+  existing versioned storage format; add an explicit migration path before changes.
+- Maintain crash recovery and snapshot consistency; design atomic compaction.
   Never write plaintext values to data files or audit logs.
 - Bound each client buffer and output queue. Handle partial socket reads/writes,
   timeouts, disconnects and cleanup on all allocation/I/O failure paths.

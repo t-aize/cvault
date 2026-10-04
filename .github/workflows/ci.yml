@@ -65,6 +65,55 @@ jobs:
           cmake --build build/fuzz-smoke --parallel
           ./build/fuzz-smoke/cvault-fuzz-parser < tests/fuzz/corpus/get.txt
 
+  macos:
+    # The explicit macOS 26 label selects the current Apple Silicon image.
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [apple-clang, llvm]
+        preset: [debug, release, asan]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.x'
+          check-latest: true
+      - name: Install current stable LLVM and choose compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install llvm pkg-config
+          brew upgrade llvm pkg-config
+          if [[ '${{ matrix.compiler }}' == 'llvm' ]]; then
+            compiler="$(brew --prefix llvm)/bin/clang"
+            "$compiler" --version
+            python - "$compiler" <<'PY'
+          import json, re, subprocess, sys
+          from pathlib import Path
+          expected = json.loads(Path('toolchain.json').read_text())['clangVersion']
+          output = subprocess.check_output([sys.argv[1], '--version'], text=True)
+          actual = re.search(r'clang version (\d+\.\d+\.\d+)', output)
+          if actual is None or tuple(map(int, actual[1].split('.'))) < tuple(map(int, expected.split('.'))):
+              raise SystemExit(f'Compiler older than {expected}: {output}')
+          PY
+          else
+            compiler="$(xcrun --find clang)"
+            "$compiler" --version
+          fi
+          echo "CC=$compiler" >> "$GITHUB_ENV"
+      - name: Install verified current build tools and libsodium
+        run: python scripts/bootstrap-macos.py
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DCVAULT_REQUIRE_NETWORK_TESTS=ON
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+      - name: Test storage, TCP poll and POSIX fork snapshots
+        run: ctest --preset ${{ matrix.preset }}
+
   windows:
     runs-on: windows-2025-vs2026
     strategy:

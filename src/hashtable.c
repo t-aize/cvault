@@ -447,3 +447,105 @@ cv_status cv_hashtable_get_stats(const cv_hashtable *table, cv_hashtable_stats *
     }
     return CV_OK;
 }
+
+cv_status cv_hashtable_expire_ms(cv_hashtable *table, const char *key, uint64_t milliseconds) {
+    if (table == NULL) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+    size_t length = 0;
+    cv_status status = key_length(key, &length);
+    if (status != CV_OK) {
+        return status;
+    }
+    cv_entry **link = find_link(table, key, length, hash_key(table, key, length));
+    if (*link == NULL) {
+        return CV_ERR_NOT_FOUND;
+    }
+    uint64_t now = 0;
+    status = table->clock(table->clock_context, &now);
+    if (status != CV_OK) {
+        return status;
+    }
+    if ((*link)->expires && now >= (*link)->deadline_ms) {
+        remove_link(table, link);
+        return CV_ERR_NOT_FOUND;
+    }
+    if (milliseconds == 0) {
+        remove_link(table, link);
+        return CV_OK;
+    }
+    if (milliseconds > UINT64_MAX - now) {
+        return CV_ERR_LIMIT;
+    }
+    (*link)->expires = true;
+    (*link)->deadline_ms = now + milliseconds;
+    return CV_OK;
+}
+
+cv_status cv_hashtable_visit(const cv_hashtable *table, bool include_expired,
+                             cv_hashtable_visitor visitor, void *context) {
+    if (table == NULL || visitor == NULL) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+    uint64_t now = 0;
+    cv_status status = table->clock(table->clock_context, &now);
+    if (status != CV_OK) {
+        return status;
+    }
+    for (size_t i = 0; i < table->bucket_count; ++i) {
+        for (cv_entry *entry = table->buckets[i]; entry != NULL; entry = entry->next) {
+            bool expired = entry->expires && now >= entry->deadline_ms;
+            if (expired && !include_expired) {
+                continue;
+            }
+            uint64_t remaining = entry->expires && !expired ? entry->deadline_ms - now : 0;
+            status = visitor(context, entry->key, entry->value, entry->value_length,
+                             entry->expires, remaining);
+            if (status != CV_OK) {
+                return status;
+            }
+        }
+    }
+    return CV_OK;
+}
+
+cv_status cv_hashtable_clone(const cv_hashtable *table, cv_hashtable **out) {
+    if (out == NULL) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+    if (table == NULL) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+    uint64_t now = 0;
+    cv_status status = table->clock(table->clock_context, &now);
+    if (status != CV_OK) {
+        return status;
+    }
+    cv_hashtable *copy = NULL;
+    status = cv_hashtable_create_with_clock(&copy, table->clock, table->clock_context);
+    if (status != CV_OK) {
+        return status;
+    }
+    for (size_t i = 0; i < table->bucket_count && status == CV_OK; ++i) {
+        for (cv_entry *entry = table->buckets[i]; entry != NULL; entry = entry->next) {
+            if (entry->expires && now >= entry->deadline_ms) {
+                continue;
+            }
+            status = cv_hashtable_set(copy, entry->key, entry->value, entry->value_length);
+            if (status != CV_OK) {
+                break;
+            }
+            cv_entry *added = *find_link(copy, entry->key, entry->key_length,
+                                         hash_key(copy, entry->key, entry->key_length));
+            added->expires = entry->expires;
+            added->deadline_ms = entry->deadline_ms;
+        }
+    }
+    if (status != CV_OK) {
+        cv_hashtable_destroy(copy);
+        return status;
+    }
+    *out = copy;
+    return CV_OK;
+}

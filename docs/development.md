@@ -66,10 +66,10 @@ See Microsoft's [binary compatibility documentation](https://learn.microsoft.com
 port during development, and Ctrl+C to stop it. See [network.md](network.md) for
 transport behavior and the pending authenticated command layer.
 
-TCP integration tests use Python 3.12+ (standard library only). If CMake cannot
+TCP and persistence integration tests use Python 3.12+ (standard library only). If CMake cannot
 find Python, pass `-DPython3_EXECUTABLE=/absolute/path/to/python` and reload.
 `-DCVAULT_REQUIRE_NETWORK_TESTS=ON` makes its absence a configuration error; CI
-enables this option. Without Python, the C network API tests still run and CMake
+enables this option. Without Python, TCP/persistence integration tests are skipped; C network API tests still run and CMake
 reports that the TCP integration tests are skipped.
 
 If presets are not imported automatically, use a Ninja profile with the C compiler
@@ -137,8 +137,34 @@ when switching compilers. The script does not install or upgrade the compiler.
 
 The `asan` profile instruments project sources, leaving the libsodium dependency
 uninstrumented. ASan + UBSan is enabled for Linux/macOS GCC/Clang toolchains.
-The automatic Linux download script supports Linux x86_64; macOS/other architectures
-need native CMake 4.4.3+, Ninja and libsodium 1.0.22+ installations.
+`scripts/bootstrap-linux.py` supports Linux x86_64. The corresponding
+`scripts/bootstrap-macos.py` supports macOS arm64 and x86_64. Both delegate to
+`bootstrap-posix.py`, using platform-specific pinned CMake/Ninja archives and the
+same verified libsodium source. Other architectures require native installations.
+
+## macOS / Apple Silicon
+
+Install Xcode Command Line Tools, Python 3.12+ and make. Provision current stable
+LLVM and select it explicitly (Apple Clang has a separate versioning scheme):
+
+```sh
+brew update
+brew install llvm pkg-config
+brew upgrade llvm pkg-config
+export CC="$(brew --prefix llvm)/bin/clang"
+python3 scripts/bootstrap-macos.py
+source .deps/env.sh
+cmake --preset debug -DCVAULT_REQUIRE_NETWORK_TESTS=ON
+cmake --build --preset debug
+ctest --preset debug
+```
+
+Use `CC="$(xcrun --find clang)"` with a fresh build directory to test Apple's
+compiler. The bootstrap downloads universal CMake 4.4.3 and Ninja 1.13.2, checks
+their hashes, builds native static libsodium, runs its `make check`, and writes
+`.deps/env.sh`. It does not install/upgrade the compiler. Homebrew commands above
+provision the latest stable LLVM; CI checks it against `toolchain.json`.
+macOS uses poll and the POSIX fork snapshot backend; epoll is Linux-only.
 
 ## Updating version pins
 
@@ -162,10 +188,12 @@ Public interfaces live in `include/cvault/`; `cvault_core` groups the modules.
 Scaffold functions return `CV_ERR_NOT_IMPLEMENTED`, authorization denies access
 by default, and sensitive buffers should be wiped before freeing. Register new
 tests in `tests/CMakeLists.txt`. Use `CHECK` for checks that must stay active in
-Release builds. Current tests cover setup and dependency integration.
+Release builds. Current tests cover the core, TCP transport, encrypted persistence
+and dependency integration; see their dedicated guides.
 
 The workflow defines six Linux combinations (GCC/Clang x Debug/Release/ASan), plus
-four Windows combinations (GCC/MSVC x Debug/Release). Windows uses the
+four Windows combinations (GCC/MSVC x Debug/Release) and six macOS combinations
+(Apple Clang/LLVM x Debug/Release/ASan) on `macos-26` Apple Silicon. Windows uses the
 `windows-2025-vs2026` runner. Checkout and Python setup actions use current explicit
 tags; the setup selects the latest stable Python 3.x. Compilers and actual tool
 versions are printed or verified during setup. Creating the workflow does not

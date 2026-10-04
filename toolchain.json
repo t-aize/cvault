@@ -42,5 +42,15 @@
     "file": "libsodium-1.0.22-stable.tar.gz",
     "url": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz",
     "sha256": "25c47d0cbf804bf28f3a1166dc145ee013e31a8dc78bb0c9d74273fb44260567"
+  },
+  "cmakeMacos": {
+    "file": "cmake-4.4.3-macos-universal.tar.gz",
+    "url": "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-macos-universal.tar.gz",
+    "sha256": "0c5d65251c14cc884bfa16bdbed3c263ce5bffe2e21c0d0d00962cb0610464fa"
+  },
+  "ninjaMacos": {
+    "file": "ninja-mac.zip",
+    "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip",
+    "sha256": "c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b"
   }
 }

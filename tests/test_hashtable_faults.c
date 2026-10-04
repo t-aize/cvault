@@ -141,6 +141,14 @@ static int allocation_failures(void) {
     CHECK(cv_hashtable_set(table, "original", (const unsigned char *)"keep", 4) == CV_OK);
     CHECK(cv_hashtable_expire(table, "original", 10) == CV_OK);
     size_t live = cv_test_live_allocations;
+    /* Clone failures must discard partial copies without touching source TTLs. */
+    for (long fail = 0; fail < 5; ++fail) {
+        cv_hashtable *copy = table;
+        cv_test_allocations_left = fail;
+        CHECK(cv_hashtable_clone(table, &copy) == CV_ERR_NO_MEMORY && copy == NULL);
+        CHECK(cv_test_live_allocations == live && cv_test_wipe_failures == 0);
+    }
+    cv_test_allocations_left = -1;
     /* Failure at value, entry and key allocation; partial copies must be wiped. */
     for (long fail = 0; fail < 3; ++fail) {
         cv_test_allocations_left = fail;

@@ -61,11 +61,16 @@ dkms.conf
 /CMakeUserPresets.json
 /.idea/
 /compile_commands.json
+__pycache__/
+*.py[cod]
 
 # Runtime data and secrets (never commit)
 /data/
 *.aof
 *.snapshot
+*.cvs
+.snapshot-*.tmp
+writer.lock
 *.log
 *.key
 .env

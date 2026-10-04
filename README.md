@@ -3,12 +3,13 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Current status: in-memory core and TCP transport implemented.** The hash
-> table supports SET, GET, DEL, EXPIRE and TTL through its C API. CMake, CLion,
-> libsodium, tests and CI definitions are ready. The server handles multiple clients,
-> PING/QUIT probes, bounded framing and graceful shutdown. Storage command dispatch,
-> authentication, encryption and persistence remain to be implemented. The CLI is
-> still a scaffold. The server binds to localhost by default and creates no data files.
+> **Current status: in-memory core, TCP transport and encrypted persistence implemented.**
+> The C APIs support SET, GET, DEL, EXPIRE and TTL, an authenticated append-only
+> journal, startup recovery and atomic background snapshots (POSIX fork / Windows
+> worker). The server handles multiple clients, PING/QUIT and graceful shutdown.
+> Authenticated storage command dispatch and the interactive CLI remain unfinished.
+> Persistence is opt-in with `--data` and `--key-file`; the default server creates
+> no data files. Documentation, code comments, tests and CI are in English.
 
 ## Why this project?
 
@@ -82,6 +83,25 @@ The Linux bootstrap requires Python 3.12+ and installs CMake/Ninja/libsodium
 locally; the compiler must already be available. The CI provisions it explicitly.
 For a custom dependency installation, pass `-DSODIUM_ROOT=/path/to/libsodium`.
 
+### macOS / Apple Silicon
+
+```sh
+brew update
+brew install llvm pkg-config
+brew upgrade llvm pkg-config
+export CC="$(brew --prefix llvm)/bin/clang"
+python3 scripts/bootstrap-macos.py
+source .deps/env.sh
+cmake --preset debug -DCVAULT_REQUIRE_NETWORK_TESTS=ON
+cmake --build --preset debug
+ctest --preset debug
+```
+
+The macOS bootstrap supports arm64 and x86_64, using verified universal CMake/Ninja
+binaries and the same verified libsodium source as Linux. Python 3.12+, Xcode
+Command Line Tools and make are required. Use a fresh build directory to switch
+to Apple Clang (`CC="$(xcrun --find clang)"`). See [development](docs/development.md).
+
 ### Current executable behavior
 
 ```powershell
@@ -99,7 +119,9 @@ The server accepts connections and configuration options:
 Send `PING\n` to receive `+PONG\n`, or `QUIT\n` to receive `+OK\n` followed by closure.
 Storage commands are rejected until command dispatch/authentication are implemented.
 See the [TCP transport guide](docs/network.md) for options, embedding and tests.
-`--data` and interactive CLI commands are still planned.
+See [encrypted persistence](docs/persistence.md) for `--data`, key provisioning,
+startup replay, durability, snapshot backends and the durable C API. Interactive
+CLI storage commands remain planned.
 
 ## Features
 
@@ -111,9 +133,9 @@ See the [TCP transport guide](docs/network.md) for options, embedding and tests.
 | Core | Hash table, collisions, resizing | ✅ |
 | Core | `SET`, `GET`, `DEL`, `EXPIRE`, `TTL` (in-memory C API) | ✅ |
 | Network | TCP server, multiple clients (`poll` / `epoll`, Windows `WSAPoll`) | ✅ |
-| Persistence | Append-only log replayed at startup | 🚧 |
-| Persistence | Snapshots (POSIX `fork`, Windows backend to design) | 🚧 |
-| Security | Encryption at rest (XChaCha20-Poly1305) | 🚧 |
+| Persistence | Encrypted append-only log replayed at startup | ✅ |
+| Persistence | Atomic snapshots (POSIX `fork`, Windows immutable-copy worker) | ✅ |
+| Security | Encryption at rest (XChaCha20-Poly1305 journal/snapshots) | ✅ |
 | Security | `AUTH` with Argon2id password verification | 🚧 |
 | Security | Per-prefix read/write access control | 🚧 |
 | Security | Audit log of sensitive operations | 🚧 |
@@ -125,7 +147,8 @@ See the [TCP transport guide](docs/network.md) for options, embedding and tests.
 See the [in-memory core guide](docs/core.md) for API contracts, expiration rules,
 memory ownership, examples, complexity and test coverage. The five operations
 are implemented in the storage API; authenticated text command dispatch remains
-planned. The [TCP transport](docs/network.md) already handles connections and frames.
+planned. The [TCP transport](docs/network.md) handles connections and frames;
+[encrypted persistence](docs/persistence.md) owns durable state and startup recovery.
 
 ```text
 CLI <-- TCP text protocol --> network loop
@@ -150,11 +173,11 @@ cvault/
 ├── src/              # Server entry point and module skeletons
 │   ├── main.c / server.c / config.c / common.c
 │   ├── parser.c / hashtable.c / crypto.c / auth.c
-│   └── persist.c / audit.c
+│   └── persist.c / persist_codec.c / persist_io.c / audit.c
 ├── client/main.c     # CLI entry point
-├── tests/            # Core/dependency smoke tests + fuzz harness/corpus
-├── scripts/          # Local Windows/CLion and Linux setup
-├── docs/             # Development, security notes and fuzzing guide
+├── tests/            # Core, network, persistence and dependency tests + fuzz harness
+├── scripts/          # Local Windows/CLion, Linux and macOS setup
+├── docs/             # Core, network, persistence, development and security guides
 └── .github/workflows/ci.yml
 ```
 
@@ -180,17 +203,18 @@ Replies will start with `+` (success), `-` (error) or `$` (value).
 Exact escaping, value framing, numeric bounds and export framing still need a
 specification before the parser and network layer are implemented.
 
-## Security design (planned)
+## Security design and remaining work
 
 The intended design protects against disk inspection, unauthenticated clients,
 malformed input and password-comparison timing attacks. It does not protect
 against process-memory inspection, a compromised host or network eavesdropping
 (TLS is not planned for the first version). Bind to localhost by default.
 
-All cryptographic primitives will come from [libsodium](https://doc.libsodium.org/).
+All cryptographic primitives come from [libsodium](https://doc.libsodium.org/).
 Its [official Windows installation guide](https://doc.libsodium.org/installation)
 documents the prebuilt MinGW libraries used by the bootstrap script.
-No encryption scheme or authentication feature is currently implemented in cvault.
+The journal and snapshots use authenticated encryption; client authentication,
+key rotation and TLS remain unfinished. See [persistence guarantees and limits](docs/persistence.md).
 See [security notes](docs/security.md) for the implementation checklist.
 
 ## Data protection goals
@@ -218,22 +242,26 @@ Checks remain enabled in Release builds. They do not validate unimplemented feat
 Network tests exercise real TCP sockets: concurrency, frame fragmentation/pipelining,
 partial writes, slow-reader isolation, half-closes, resets, connection limits,
 IPv4/IPv6, timeouts, callback failures and bounded shutdown. Python 3.12+ enables
-the integration suite; CI requires it. Linux runs both poll and epoll, Windows WSAPoll.
+the integration suites; CI requires it. Linux runs both poll and epoll, Windows
+WSAPoll and macOS poll. Persistence tests cover corruption, torn writes, recovery,
+expiration, snapshot consistency, locks and injected allocation/I/O failures.
 
 CI uses Ubuntu 26.04 runners with the official GCC 16.2.0 container and Clang 23
 from LLVM's repository, testing Debug, Release and ASan/UBSan. Windows Server 2025
-with Visual Studio 2026 tests GCC and MSVC in Debug and Release. Build tools and
-libsodium use the same verified downloads as local setup. Checkout **7.0.1** and
+with Visual Studio 2026 tests GCC and MSVC in Debug and Release. macOS 26 Apple
+Silicon tests Apple Clang and current stable LLVM in Debug, Release and ASan/UBSan.
+Build tools and libsodium use the same verified downloads as local setup.
+Checkout **7.0.1** and
 setup-python **7.0.0** use explicit version tags; Dependabot checks
 GitHub Actions daily. Remote CI execution requires pushing the repository.
 The parser harness can be built now; see [fuzzing instructions](docs/fuzzing.md).
 
 1. Protocol specification and parser + negative/boundary tests.
 2. Authenticated command dispatch and CLI integration; schedule expired-entry sweeps.
-3. Versioned append-only format and crash-safe replay.
-4. Encryption/key management and authentication.
+3. Journal compaction, storage quotas and benchmarks.
+4. Authentication, key rotation and recovery tooling.
 5. Audit log, prefix ACLs, export, purge and compaction.
-6. Full fuzzing campaigns, Valgrind, benchmarks and snapshots.
+6. Full fuzzing campaigns, Valgrind and power-loss testing.
 
 ## License
 

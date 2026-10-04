@@ -11,6 +11,8 @@ const char *cv_status_string(cv_status status) {
     case CV_ERR_UNAUTHORIZED: return "unauthorized";
     case CV_ERR_IO: return "I/O error";
     case CV_ERR_LIMIT: return "size limit exceeded";
+    case CV_ERR_CORRUPT: return "invalid or inconsistent persistence format";
+    case CV_ERR_BUSY: return "resource already in use";
     default: return "unknown status";
     }
 }

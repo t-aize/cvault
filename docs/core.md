@@ -135,7 +135,13 @@ int main(void) {
 
 All access requires external synchronization, even read-only operations if another
 thread can mutate the table. Borrowed values must be consumed within that protected
-scope. No internal locks or stable iterators are provided.
+scope. No internal locks or stable iterators are provided. `cv_hashtable_visit` uses one
+clock reading and borrowed slices; its callback must not mutate/reenter the table.
+It can include physically retained expired entries for snapshot-history recovery.
+`cv_hashtable_clone` deep-copies live entries with exact monotonic deadlines and
+preserves the borrowed clock/context. `cv_hashtable_expire_ms` supports millisecond
+deadlines with the same overflow/deletion rules. [Persistence](persistence.md)
+owns a table and uses these helpers; durable mutations must use its API.
 
 ## Verification
 
