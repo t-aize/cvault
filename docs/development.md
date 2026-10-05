@@ -23,6 +23,60 @@ GCC/Clang builds use C23, the latest published stable C language standard. MSVC
 uses C17, its latest supported stable C dialect. The project does not require
 experimental C2y features or prerelease tools.
 
+## Quick reference by operating system
+
+Build folders and executables differ per system:
+
+| System | Build folder | Server executable |
+|---|---|---|
+| Windows, `bootstrap-windows.ps1` (MinGW GCC) | `build\windows-gcc-16.2.0-debug` | `build\windows-gcc-16.2.0-debug\cvault-server.exe` |
+| Windows, CLion default | `cmake-build-debug` | `cmake-build-debug\cvault-server.exe` |
+| Linux | `build/debug` | `build/debug/cvault-server` |
+| macOS | `build/debug` | `build/debug/cvault-server` |
+
+The same tasks on each system (details are in the sections that follow).
+
+Windows (PowerShell). The tools stay in `.deps/`; the first lines add them to `PATH`
+for the current session only. There is no sanitizer preset on Windows (use WSL):
+
+```powershell
+.\scripts\bootstrap-windows.ps1 -SkipBuild        # once: tools, libsodium, presets
+$paths = Get-Content .deps/paths.json -Raw | ConvertFrom-Json
+$env:PATH = "$($paths.cmakeBinDirectory);$($paths.binDirectory);$env:PATH"
+cmake --preset windows-clion-debug                  # configure
+cmake --build --preset windows-clion-debug          # build
+ctest --preset windows-clion-debug                  # test
+cmake --preset windows-clion-release                # release build and tests
+cmake --build --preset windows-clion-release
+ctest --preset windows-clion-release
+.\build\windows-gcc-16.2.0-debug\cvault-server.exe --port 6380
+```
+
+Linux:
+
+```sh
+python3 scripts/bootstrap-linux.py                 # once: tools and libsodium
+source .deps/env.sh                                # once per shell
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+cmake --preset release && cmake --build --preset release && ctest --preset release
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+./build/debug/cvault-server --port 6380
+# Shortcuts for the same presets: make, make test, make release, make asan
+```
+
+macOS (choose the compiler first, see the macOS section):
+
+```sh
+export CC="$(brew --prefix llvm)/bin/clang"        # or: CC="$(xcrun --find clang)"
+python3 scripts/bootstrap-macos.py                 # once: tools and libsodium
+source .deps/env.sh                                # once per shell
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+cmake --preset release && cmake --build --preset release && ctest --preset release
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+./build/debug/cvault-server --port 6380
+# Shortcuts for the same presets: make, make test, make release, make asan
+```
+
 ## Windows: local setup
 
 Open PowerShell at the repository root and run:
@@ -82,7 +136,24 @@ After changing toolchains, use **Tools -> CMake -> Reset Cache and Reload Projec
 if the build reports a missing `CMakeFiles/rules.ninja`. This regenerates the
 active profile's incomplete build directory before compiling.
 
-## Rebuilding from PowerShell
+## CLion on Linux and macOS
+
+The bootstrap scripts put CMake and Ninja in `.deps/tools/` so that CLion can use the
+versions the presets require (schema 12).
+
+1. Run `scripts/bootstrap-linux.py` (Linux) or `scripts/bootstrap-macos.py` (macOS)
+   once.
+2. Under **Settings -> Build, Execution, Deployment -> Toolchains**, keep the
+   system toolchain and set **CMake** to
+   - Linux: `.deps/tools/cmake-4.4.3-linux-x86_64/bin/cmake`
+   - macOS: `.deps/tools/cmake-4.4.3-macos-universal/CMake.app/Contents/bin/cmake`
+3. Set the build tool to `.deps/tools/ninja-linux-1.13.2/ninja` (Linux) or
+   `.deps/tools/ninja-macos-1.13.2/ninja` (macOS).
+4. In the CMake profile's **Environment** field, copy the `SODIUM_ROOT` value from
+   `.deps/env.sh` (and `SDKROOT` on macOS) so CMake finds the bootstrapped libsodium.
+5. Reload CMake and enable the `debug`, `release` or `asan` preset.
+
+## Rebuilding from PowerShell (Windows)
 
 ```powershell
 $paths = Get-Content .deps/paths.json -Raw | ConvertFrom-Json
@@ -108,6 +179,21 @@ $ctestExe = Join-Path $paths.cmakeBinDirectory 'ctest.exe'
 & $cmakeExe --build build/msvc2026 --config Debug
 & $ctestExe --test-dir build/msvc2026 -C Debug --output-on-failure
 ```
+
+## Rebuilding on Linux and macOS
+
+Rebuild a configuration after the first setup (the environment from `.deps/env.sh`
+must be loaded in the shell):
+
+```sh
+source .deps/env.sh
+cmake --build --preset release
+ctest --preset release
+```
+
+Each preset has its own build folder (`build/debug`, `build/release`, `build/asan`)
+containing `compile_commands.json`. Visual Studio / MSVC is Windows-only; Linux and
+macOS use GCC or Clang.
 
 ## Linux / WSL
 

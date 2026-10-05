@@ -15,12 +15,37 @@ only PING/QUIT probes; it never reads or writes the hash table.
 
 ## Running the server
 
+Windows (PowerShell). The executable is in `cmake-build-debug\` when built from CLion
+and in `build\windows-gcc-16.2.0-debug\` when built by `bootstrap-windows.ps1`.
+Windows supports only the WSAPoll backend (`auto`):
+
 ```powershell
 .\cmake-build-debug\cvault-server.exe --bind 127.0.0.1 --port 6380 --backend auto
 ```
 
+Linux. `epoll` and `poll` are both available:
+
 ```bash
 ./build/debug/cvault-server --bind 127.0.0.1 --port 6380 --backend epoll
+./build/debug/cvault-server --bind 127.0.0.1 --port 6380 --backend poll
+```
+
+macOS. Only `poll` exists (`epoll` is Linux-only and is rejected):
+
+```sh
+./build/debug/cvault-server --bind 127.0.0.1 --port 6380 --backend poll
+```
+
+Stop the server with Ctrl+C on every system. A running server can be probed with
+`PING`: use `nc 127.0.0.1 6380` on Linux and macOS, or the .NET client on Windows:
+
+```powershell
+$client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', 6380)
+$stream = $client.GetStream()
+$stream.Write([Text.Encoding]::ASCII.GetBytes("PING`n"), 0, 5)
+$buffer = New-Object byte[] 16
+[Text.Encoding]::ASCII.GetString($buffer, 0, $stream.Read($buffer, 0, 16))
+$client.Close()
 ```
 
 Startup prints `Listening on ADDRESS:PORT (BACKEND)` only after bind/listen succeeds,

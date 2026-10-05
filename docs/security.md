@@ -45,18 +45,42 @@ DACL; existing Windows file ACLs remain the operator's responsibility. If runnin
 under a service account, grant that account access instead. Never commit `runtime/`,
 credentials or encryption keys. Inspect command exit codes when provisioning.
 
-### Linux / macOS
+### Linux
+
+Run from the project root, with the Debug executable built (`build/debug/`).
+`umask 077` makes every file created below owner-private:
 
 ```sh
 umask 077
 mkdir runtime
-./build/debug/cvault-server --hash-password
-# Put the returned PHC string into runtime/security.conf as shown below.
-chmod 600 runtime/security.conf
+hash="$(./build/debug/cvault-server --hash-password)"
+printf 'CVAULT-SECURITY-1\nuser alice %s\nallow alice rw alice:\n' "$hash" > runtime/security.conf
 ./build/debug/cvault-server --generate-key runtime/audit.key
+stat -c '%a %n' runtime runtime/security.conf runtime/audit.key   # expect 700 / 600 / 600
 ./build/debug/cvault-server --security runtime/security.conf \
   --audit runtime/audit.bin --audit-key-file runtime/audit.key
 ```
+
+### macOS
+
+The commands are the same as on Linux (the executable path is also
+`build/debug/cvault-server`); only `stat` differs because macOS ships the BSD
+variant:
+
+```sh
+umask 077
+mkdir runtime
+hash="$(./build/debug/cvault-server --hash-password)"
+printf 'CVAULT-SECURITY-1\nuser alice %s\nallow alice rw alice:\n' "$hash" > runtime/security.conf
+./build/debug/cvault-server --generate-key runtime/audit.key
+stat -f '%Lp %N' runtime runtime/security.conf runtime/audit.key   # expect 700 / 600 / 600
+./build/debug/cvault-server --security runtime/security.conf \
+  --audit runtime/audit.bin --audit-key-file runtime/audit.key
+```
+
+The password prompt appears on the terminal (stderr) and the hash is captured from
+stdout. Add further `user` and `allow` lines to `runtime/security.conf` with an
+editor as described in the next section.
 
 Policy/key/audit files must be owner-private regular files. Leaf symlinks and
 multiple hard links are rejected. Keep their parent directories trusted: the
@@ -193,13 +217,27 @@ key and wiped from the caller buffer. The derivation is keyed BLAKE2b-256 over
 of writes, but identities and event bodies are encrypted. One exclusive `.lock`
 file prevents concurrent writers/exporters. No plaintext mirror is written.
 
-Stop the server before exporting:
+Stop the server before exporting.
+
+Windows (PowerShell):
 
 ```powershell
 .\cmake-build-debug\cvault-server.exe --dump-audit '.\runtime\audit.bin' --audit-key-file '.\runtime\audit.key'
 ```
 
-The same command works with the POSIX executable path. Export authenticates the
+Linux:
+
+```sh
+./build/debug/cvault-server --dump-audit runtime/audit.bin --audit-key-file runtime/audit.key
+```
+
+macOS:
+
+```sh
+./build/debug/cvault-server --dump-audit runtime/audit.bin --audit-key-file runtime/audit.key
+```
+
+Export authenticates the
 entire file before writing JSON Lines, then checks each record again while reading.
 The output contains sensitive identity metadata: protect exports and their backups.
 The option order above is required for this standalone command. It never creates

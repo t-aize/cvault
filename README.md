@@ -70,12 +70,17 @@ cmake --preset debug
 cmake --build --preset debug
 ctest --preset debug
 
-# Equivalent convenience commands:
+# Equivalent convenience commands (Linux and macOS only):
 make
 make test
 make asan          # GCC/Clang on Linux/macOS; also runs tests
 make release
 ```
+
+Windows has no `make` entry point: use the `windows-clion-debug` and
+`windows-clion-release` presets as shown in the
+[development guide](docs/development.md#quick-reference-by-operating-system).
+Sanitizer builds (`asan`) are not available natively on Windows; use WSL.
 
 Use `CC=clang-23` for the bootstrap and CMake configuration to choose Clang.
 The Linux bootstrap requires Python 3.12+ and installs CMake/Ninja/libsodium
@@ -103,17 +108,33 @@ to Apple Clang (`CC="$(xcrun --find clang)"`). See [development](docs/developmen
 
 ### Current executable behavior
 
+Windows (PowerShell):
+
 ```powershell
 .\build\windows-gcc-16.2.0-debug\cvault-server.exe --help
 .\build\windows-gcc-16.2.0-debug\cvault-cli.exe --version
+.\build\windows-gcc-16.2.0-debug\cvault-server.exe --bind 127.0.0.1 --port 6380 --backend auto
 ```
 
-On Linux the executables are `build/debug/cvault-server` and `build/debug/cvault-cli`.
-The server accepts connections and configuration options:
+Linux:
 
-```powershell
-.\cmake-build-debug\cvault-server.exe --bind 127.0.0.1 --port 6380 --backend auto
+```bash
+./build/debug/cvault-server --help
+./build/debug/cvault-cli --version
+./build/debug/cvault-server --bind 127.0.0.1 --port 6380 --backend auto
 ```
+
+macOS:
+
+```sh
+./build/debug/cvault-server --help
+./build/debug/cvault-cli --version
+./build/debug/cvault-server --bind 127.0.0.1 --port 6380 --backend auto
+```
+
+CLion on Windows places its builds in `cmake-build-debug\` instead. The
+[development guide](docs/development.md#quick-reference-by-operating-system) lists
+the commands and folders for every system side by side.
 
 Send `PING\n` to receive `+PONG\n`, or `QUIT\n` to receive `+OK\n` followed by closure.
 Enable authenticated storage with `--security`, `--audit` and `--audit-key-file`.

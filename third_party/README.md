@@ -29,5 +29,35 @@ To update, download `argparse.c`, `argparse.h` and `LICENSE` from the new commit
 (`https://raw.githubusercontent.com/cofyc/argparse/<commit>/<file>`), replace the
 files, then update the commit, date and digests above.
 
+Windows (PowerShell):
+
+```powershell
+$commit = '4e30aba50340af7f2d3932492c4bffdef7669db8'   # replace with the new commit
+foreach ($file in 'argparse.c', 'argparse.h', 'LICENSE') {
+    Invoke-WebRequest "https://raw.githubusercontent.com/cofyc/argparse/$commit/$file" -OutFile "third_party/argparse/$file"
+}
+Get-FileHash third_party/argparse/* -Algorithm SHA256
+```
+
+Linux:
+
+```sh
+commit=4e30aba50340af7f2d3932492c4bffdef7669db8   # replace with the new commit
+for file in argparse.c argparse.h LICENSE; do
+  curl -fsSL "https://raw.githubusercontent.com/cofyc/argparse/$commit/$file" -o "third_party/argparse/$file"
+done
+sha256sum third_party/argparse/*
+```
+
+macOS:
+
+```sh
+commit=4e30aba50340af7f2d3932492c4bffdef7669db8   # replace with the new commit
+for file in argparse.c argparse.h LICENSE; do
+  curl -fsSL "https://raw.githubusercontent.com/cofyc/argparse/$commit/$file" -o "third_party/argparse/$file"
+done
+shasum -a 256 third_party/argparse/*
+```
+
 The library is compiled as its own target (`cvault_argparse`) without the strict
 project warning flags, because the code is not ours to change.

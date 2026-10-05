@@ -15,15 +15,33 @@ Persistence is opt-in. Without these options the server creates no data files.
 Generate a private key once, keep it outside version control, and back it up
 separately from the data. A lost key makes recovery impossible.
 
+Windows (PowerShell):
+
 ```powershell
 .\cmake-build-debug\cvault-server.exe --generate-key .\master.key
 .\cmake-build-debug\cvault-server.exe --data .\data --key-file .\master.key
 ```
 
+Linux:
+
 ```sh
+umask 077
 ./build/debug/cvault-server --generate-key ./master.key
 ./build/debug/cvault-server --data ./data --key-file ./master.key
 ```
+
+macOS:
+
+```sh
+umask 077
+./build/debug/cvault-server --generate-key ./master.key
+./build/debug/cvault-server --data ./data --key-file ./master.key
+```
+
+On Linux and macOS the key file and the data directory are created owner-private
+(mode 0600 / 0700) whatever the `umask`; `umask 077` additionally protects any other
+file you create in the same session. On Windows they receive a protected owner/SYSTEM
+DACL.
 
 Key generation creates an exact 32-byte random binary file exclusively; an existing
 path is never overwritten. The server requires `--data` and `--key-file` together.

@@ -53,21 +53,42 @@ why a deadline uses a monotonic clock, or why an intent must be synchronized bef
 a mutation. Keep error paths explicit and short. Do not compress independent
 allocations, assignments or cleanup calls onto one line.
 
-Use clang-format 23.1.2 (matching the current LLVM toolchain) for repository C files:
+Use clang-format 23.1.2 (matching the current LLVM toolchain) for repository C files.
+The same version is available on every system from PyPI (`pip install
+clang-format==23.1.2`); the system packages named below work as well.
+
+Windows (PowerShell; `winget install LLVM.LLVM` also provides clang-format):
 
 ```powershell
+python -m pip install clang-format==23.1.2
 $files = @(Get-ChildItem src, include, client, tests -Recurse -File |
     Where-Object { $_.Extension -in '.c', '.h' } | ForEach-Object FullName)
 clang-format -i --style=file @files
 clang-format --dry-run --Werror --style=file @files
 ```
 
-Or, from a POSIX shell:
+Linux (`sudo apt install clang-format-23` also works):
 
 ```sh
+python3 -m pip install clang-format==23.1.2
 find src include client tests -type f \( -name '*.c' -o -name '*.h' \) \
   -exec clang-format -i --style=file {} +
+find src include client tests -type f \( -name '*.c' -o -name '*.h' \) \
+  -exec clang-format --dry-run --Werror --style=file {} +
 ```
+
+macOS (`brew install clang-format` also works):
+
+```sh
+python3 -m pip install clang-format==23.1.2
+find src include client tests -type f \( -name '*.c' -o -name '*.h' \) \
+  -exec clang-format -i --style=file {} +
+find src include client tests -type f \( -name '*.c' -o -name '*.h' \) \
+  -exec clang-format --dry-run --Werror --style=file {} +
+```
+
+Vendored code in `third_party/` is excluded: it is not listed above, and its own
+`.clang-format` disables formatting.
 
 Configure CLion to respect the repository's `.clang-format`. Includes are grouped
 by hand with blank lines (project headers, then system and third-party headers);
