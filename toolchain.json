@@ -41,7 +41,7 @@
   "sodiumSource": {
     "file": "libsodium-1.0.22-stable.tar.gz",
     "url": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz",
-    "sha256": "25c47d0cbf804bf28f3a1166dc145ee013e31a8dc78bb0c9d74273fb44260567"
+    "sha256": "625054219273c74fd204b669d97070fb60cf16b6d68b9909aff7a3530792262f"
   },
   "cmakeMacos": {
     "file": "cmake-4.4.3-macos-universal.tar.gz",
