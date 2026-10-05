@@ -23,7 +23,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install bootstrap dependencies
-        run: apt-get update && apt-get install -y ca-certificates curl gnupg pkg-config
+        # Use the container's own Python: setup-python builds link against the
+        # runner's newer glibc and fail to import C extensions (e.g. termios).
+        run: apt-get update && apt-get install -y ca-certificates curl gnupg pkg-config python3 python-is-python3
       - name: Install current stable Clang from the official LLVM repository
         if: matrix.compiler == 'clang-23'
         run: |
@@ -32,10 +34,6 @@ jobs:
           echo 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/trixie/ llvm-toolchain-trixie-23 main' > /etc/apt/sources.list.d/llvm.list
           apt-get update
           apt-get install -y clang-23 libclang-rt-23-dev
-      - uses: actions/setup-python@v7.0.0
-        with:
-          python-version: '3.x'
-          check-latest: true
       - name: Verify compiler and install pinned current build tools and libsodium
         shell: bash
         run: |
