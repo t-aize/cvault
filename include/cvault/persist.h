@@ -1,102 +1,200 @@
+/**
+ * @file persist.h
+ * @brief Encrypted append-only storage with authenticated checkpoints.
+ *
+ * A persistent store keeps the live key/value state in memory and mirrors every
+ * mutation into an XChaCha20-Poly1305 encrypted journal. Periodic snapshots
+ * checkpoint the state; on start-up the snapshot and the journal tail are
+ * authenticated and replayed. No plaintext key or value ever reaches the disk.
+ *
+ * ## Guarantees
+ *  - One owner thread or process per directory (enforced with a lock file).
+ *  - Use a private, trusted local directory.
+ *  - A successful mutation has synchronised the journal *before* the new state
+ *    becomes visible in memory.
+ *  - An I/O failure makes the handle unusable until it is closed and reopened;
+ *    the failed operation may or may not appear after recovery.
+ *  - Only an incomplete final journal record is repaired (truncated). Any
+ *    complete but invalid record, or a malformed snapshot, fails closed.
+ *
+ * See docs/persistence.md for the on-disk formats and recovery rules.
+ */
+
 #ifndef CVAULT_PERSIST_H
 #define CVAULT_PERSIST_H
 
 #include "cvault/common.h"
 #include "cvault/hashtable.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/** @file Encrypted append-only storage and authenticated checkpoints.
- * One owner thread/process per directory. Use a private, trusted local directory.
- * Successful mutations synchronize the journal before publishing new memory state.
- * I/O failure makes the handle unusable until close/reopen; a failed operation may
- * still appear after recovery. No plaintext key/value records are written to disk.
- */
+/** Size of the encryption key, in bytes. */
 #define CV_PERSIST_KEY_BYTES ((size_t)32)
+
+/** Opaque handle to an open persistent store. */
 typedef struct cv_persist cv_persist;
 
-/** Unix-epoch milliseconds for persisted deadlines; defaults to the system clock.
- * Clock/context are borrowed until close; POSIX snapshot children inherit them.
- * Callbacks must be nonblocking and fork-safe in a single-threaded process.
+/**
+ * @brief Source of Unix-epoch milliseconds for persisted deadlines.
+ *
+ * Defaults to the system clock. The clock and its context are borrowed until
+ * the store is closed, and POSIX snapshot children inherit them, so callbacks
+ * must be non-blocking and fork-safe in a single-threaded process.
+ *
+ * @param context   Opaque pointer supplied in #cv_persist_options.
+ * @param epoch_ms  Receives the current time; written only on #CV_OK.
  */
 typedef cv_status (*cv_persist_clock)(void *context, uint64_t *epoch_ms);
 
+/** Parameters for cv_persist_open(); the structure is copied. */
 typedef struct {
-    const char *directory;
-    const unsigned char *key;
-    size_t key_length;
-    cv_persist_clock clock;
-    void *clock_context;
+    const char *directory;    /**< Data directory, created privately if absent. */
+    const unsigned char *key; /**< Encryption key (copied and wiped on close). */
+    size_t key_length;        /**< Must equal #CV_PERSIST_KEY_BYTES. */
+    cv_persist_clock clock;   /**< Optional clock; NULL selects the system clock. */
+    void *clock_context;      /**< Borrowed argument for #clock. */
 } cv_persist_options;
 
+/** Counters describing the durable state. */
 typedef struct {
-    uint64_t sequence;
-    uint64_t snapshot_sequence;
-    bool repaired_tail;
-    bool failed;
+    uint64_t sequence;          /**< Sequence number of the last journal record. */
+    uint64_t snapshot_sequence; /**< Sequence covered by the newest snapshot. */
+    bool repaired_tail;         /**< An incomplete final record was truncated on open. */
+    bool failed;                /**< The handle is poisoned after an I/O failure. */
 } cv_persist_stats;
 
-/** Create the directory if absent, lock it exclusively, authenticate/replay its
- * snapshot and journal, and restore live state. Only an incomplete final journal
- * record is truncated. Complete invalid records or malformed snapshots fail closed.
- * *out resets on error. Options/key are copied; clock context remains borrowed.
+/**
+ * @brief Open a store: lock the directory, replay snapshot and journal.
+ *
+ * The directory is created if absent. Options and key are copied; the clock
+ * context stays borrowed.
+ *
+ * @param options Open parameters.
+ * @param out     Receives the store; set to NULL on failure.
+ * @return #CV_OK; #CV_ERR_INVALID_ARGUMENT; #CV_ERR_BUSY (directory in use);
+ *         #CV_ERR_CRYPTO (wrong key); #CV_ERR_CORRUPT; #CV_ERR_IO;
+ *         #CV_ERR_NO_MEMORY.
  */
 cv_status cv_persist_open(const cv_persist_options *options, cv_persist **out);
 
-/** Durable operations. SET clears TTL; EXPIRE nonpositive seconds deletes.
- * Missing DEL/EXPIRE returns NOT_FOUND without writing. Cloning prepares changes
- * before I/O, so allocation failure leaves disk/memory unchanged. Mutations are
- * O(live state size); this favors transactional correctness over write throughput.
+/**
+ * @brief SET: durably store a value, clearing any previous TTL.
+ *
+ * Changes are prepared on a copy before any I/O, so an allocation failure
+ * leaves both disk and memory unchanged. Mutations cost O(live state size);
+ * the design favours transactional correctness over write throughput.
+ *
+ * @return #CV_OK, #CV_ERR_INVALID_ARGUMENT, #CV_ERR_LIMIT, #CV_ERR_NO_MEMORY,
+ *         #CV_ERR_CRYPTO or #CV_ERR_IO.
  */
 cv_status
 cv_persist_set(cv_persist *store, const char *key, const unsigned char *value, size_t length);
 
+/**
+ * @brief DEL: durably delete a key.
+ *
+ * A missing key returns #CV_ERR_NOT_FOUND without writing anything.
+ */
 cv_status cv_persist_delete(cv_persist *store, const char *key);
 
+/**
+ * @brief EXPIRE: durably set a relative TTL; non-positive seconds delete.
+ *
+ * A missing key returns #CV_ERR_NOT_FOUND without writing anything.
+ */
 cv_status cv_persist_expire(cv_persist *store, const char *key, int64_t seconds);
 
+/**
+ * @brief GET: borrow a value from the in-memory state.
+ *
+ * Same contract as cv_hashtable_get(): the pointer stays valid until the next
+ * mutation or close.
+ */
 cv_status cv_persist_get(const cv_persist *store,
                          const char *key,
                          const unsigned char **value,
                          size_t *length);
 
+/** @brief TTL: remaining whole seconds, see cv_hashtable_ttl(). */
 cv_status cv_persist_ttl(const cv_persist *store, const char *key, int64_t *seconds);
 
+/**
+ * @brief Read the durable-state counters.
+ *
+ * @param out Receives the counters; zeroed on error.
+ */
 cv_status cv_persist_get_stats(const cv_persist *store, cv_persist_stats *out);
 
-/** Borrow a read-only table until the next mutation or close. NULL on failed handle.
- * Do not cast away const: direct mutations bypass the journal.
+/**
+ * @brief Borrow the live table for read-only iteration.
+ *
+ * Valid until the next mutation or close. Never cast away const: direct
+ * mutations would bypass the journal.
+ *
+ * @return The table, or NULL when the handle has failed.
  */
 const cv_hashtable *cv_persist_table(const cv_persist *store);
 
-/** Synchronous atomic snapshot; journal is retained (no compaction yet). */
+/**
+ * @brief Write an atomic snapshot and wait for it.
+ *
+ * The journal is retained; compaction is not implemented yet.
+ */
 cv_status cv_persist_snapshot(cv_persist *store);
 
-/** Start a background snapshot: POSIX fork (single-threaded process only), or a
- * Windows worker using an owned, frozen copy. Only one job may run per handle.
- * The job captures a sequence boundary; later writes remain in the journal.
+/**
+ * @brief Start a snapshot in the background.
+ *
+ * POSIX forks a child (single-threaded processes only); Windows uses a worker
+ * thread on an owned, frozen copy. Only one job may run per handle. The job
+ * captures a sequence boundary and later writes remain in the journal.
  */
 cv_status cv_persist_snapshot_start(cv_persist *store);
 
-/** Poll without blocking, or join the active job. Poll resets *done on errors;
- * completed jobs are reclaimed and their status returned. No active job means done.
+/**
+ * @brief Check on the background snapshot without blocking.
+ *
+ * Completed jobs are reclaimed and their status returned. With no active job,
+ * @p done is true.
+ *
+ * @param done Receives whether the job has finished; reset on errors.
  */
 cv_status cv_persist_snapshot_poll(cv_persist *store, bool *done);
 
+/** @brief Block until the active background snapshot (if any) finishes. */
 cv_status cv_persist_snapshot_wait(cv_persist *store);
 
-/** Join any snapshot, close files/release lock, wipe keys and destroy memory state.
- * NULL is safe. Always releases resources, even when returning an I/O/job error.
+/**
+ * @brief Join any snapshot, close files, release the lock and wipe all secrets.
+ *
+ * Resources are always released, even when an I/O or job error is returned.
+ *
+ * @param store Store to close; NULL is safe.
  */
 cv_status cv_persist_close(cv_persist *store);
 
-/** Generate a new 32-byte key file exclusively (never overwrite), or load an exact
- * 32-byte private regular file. POSIX requires owner-only permissions on load.
- * Windows creation uses a protected owner/System DACL. Caller owns/wipes loaded key.
+/**
+ * @brief Generate a new random key file; an existing file is never overwritten.
+ *
+ * POSIX creates the file with owner-only permissions; Windows uses a protected
+ * owner/SYSTEM DACL.
+ *
+ * @return #CV_OK, #CV_ERR_BUSY if the path exists, #CV_ERR_CRYPTO or #CV_ERR_IO.
  */
 cv_status cv_persist_key_generate(const char *path);
 
+/**
+ * @brief Load a key from an exact 32-byte private regular file.
+ *
+ * POSIX requires owner-only permissions. The caller owns the output and must
+ * wipe it with cv_crypto_wipe().
+ *
+ * @param path Key file path.
+ * @param key  Receives the 32 key bytes.
+ * @return #CV_OK, #CV_ERR_NOT_FOUND, #CV_ERR_CORRUPT (wrong size) or #CV_ERR_IO.
+ */
 cv_status cv_persist_key_load(const char *path, unsigned char key[CV_PERSIST_KEY_BYTES]);
 
-#endif
+#endif /* CVAULT_PERSIST_H */

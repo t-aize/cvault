@@ -1,15 +1,30 @@
-# Prefer an explicit prefix, then the local bootstrap, then system paths.
-set(SODIUM_ROOT "$ENV{SODIUM_ROOT}" CACHE PATH "libsodium installation prefix (include/ and lib/)")
+# Locate libsodium and expose it as the imported target Sodium::Sodium.
+#
+# Search order: an explicit SODIUM_ROOT prefix (cache or environment variable),
+# then the local bootstrap recorded in .deps/paths.json (Windows only), then
+# pkg-config and the system paths.
+#
+# Output variables:
+#   Sodium_FOUND, Sodium_VERSION, Sodium_INCLUDE_DIR, Sodium_LIBRARY,
+#   Sodium_RUNTIME_DLL (MinGW only: the DLL to copy next to executables)
+
+set(SODIUM_ROOT "$ENV{SODIUM_ROOT}" CACHE PATH
+    "libsodium installation prefix (include/ and lib/)")
+
+# On Windows, adopt the prefix recorded by scripts/bootstrap-windows.ps1.
 if(NOT SODIUM_ROOT AND WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/.deps/paths.json")
     file(READ "${PROJECT_SOURCE_DIR}/.deps/paths.json" _sodium_local_paths)
+
     if(MSVC)
         set(_sodium_local_key msvcSodiumRoot)
     elseif(MINGW)
         set(_sodium_local_key sodiumRoot)
     endif()
+
     if(_sodium_local_key)
         string(JSON _sodium_local_root ERROR_VARIABLE _sodium_local_error
             GET "${_sodium_local_paths}" "${_sodium_local_key}")
+
         if(NOT _sodium_local_error AND _sodium_local_root
                 AND EXISTS "${_sodium_local_root}/include/sodium.h")
             file(TO_CMAKE_PATH "${_sodium_local_root}" _sodium_local_root)
@@ -18,14 +33,20 @@ if(NOT SODIUM_ROOT AND WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/.deps/paths.json"
         endif()
     endif()
 endif()
+
+# Without an explicit prefix, ask pkg-config for hints.
 if(NOT SODIUM_ROOT)
     find_package(PkgConfig QUIET)
+
     if(PkgConfig_FOUND)
         pkg_check_modules(PC_SODIUM QUIET libsodium)
     endif()
 endif()
+
 find_path(Sodium_INCLUDE_DIR NAMES sodium.h
     HINTS "${SODIUM_ROOT}/include" ${PC_SODIUM_INCLUDE_DIRS})
+
+# Pick the right library flavour for the toolchain.
 if(MSVC AND EXISTS "${SODIUM_ROOT}/x64/Release/v143/static/libsodium.lib")
     # Official stable MSVC archive: non-LTCG static libraries, compatible with VS 2026.
     set(Sodium_LIBRARY "${SODIUM_ROOT}/x64/Release/v143/static/libsodium.lib")
@@ -36,26 +57,37 @@ elseif(MINGW AND SODIUM_ROOT)
     find_library(_sodium_import_library NAMES libsodium.dll.a
         PATHS "${SODIUM_ROOT}/lib" NO_DEFAULT_PATH NO_CACHE)
     set(Sodium_LIBRARY "${_sodium_import_library}")
+
     find_file(Sodium_RUNTIME_DLL NAMES libsodium-26.dll
         PATHS "${SODIUM_ROOT}/bin" NO_DEFAULT_PATH)
 else()
     find_library(Sodium_LIBRARY NAMES sodium libsodium
         HINTS "${SODIUM_ROOT}/lib" ${PC_SODIUM_LIBRARY_DIRS})
 endif()
+
+# Read the version from the installed header so that find_package(Sodium <min>)
+# can enforce a minimum release.
 if(Sodium_INCLUDE_DIR AND EXISTS "${Sodium_INCLUDE_DIR}/sodium/version.h")
     file(STRINGS "${Sodium_INCLUDE_DIR}/sodium/version.h" _sodium_version_line
         REGEX "^#define SODIUM_VERSION_STRING")
     string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" Sodium_VERSION "${_sodium_version_line}")
 endif()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Sodium
-    REQUIRED_VARS Sodium_INCLUDE_DIR Sodium_LIBRARY VERSION_VAR Sodium_VERSION
-    REASON_FAILURE_MESSAGE "Install libsodium-dev (Linux), run scripts/bootstrap-windows.ps1 (CLion MinGW x64), or set SODIUM_ROOT.")
+    REQUIRED_VARS Sodium_INCLUDE_DIR Sodium_LIBRARY
+    VERSION_VAR Sodium_VERSION
+    REASON_FAILURE_MESSAGE
+        "Install libsodium-dev (Linux), run scripts/bootstrap-windows.ps1 (CLion MinGW x64), or set SODIUM_ROOT.")
+
+# Create the imported target once.
 if(Sodium_FOUND AND NOT TARGET Sodium::Sodium)
     add_library(Sodium::Sodium UNKNOWN IMPORTED)
     set_target_properties(Sodium::Sodium PROPERTIES
         IMPORTED_LOCATION "${Sodium_LIBRARY}"
         INTERFACE_INCLUDE_DIRECTORIES "${Sodium_INCLUDE_DIR}")
+
+    # MSVC ships distinct Debug and Release libraries.
     if(Sodium_LIBRARY_DEBUG)
         set_target_properties(Sodium::Sodium PROPERTIES
             IMPORTED_CONFIGURATIONS "DEBUG;RELEASE"
@@ -64,9 +96,13 @@ if(Sodium_FOUND AND NOT TARGET Sodium::Sodium)
             MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
             MAP_IMPORTED_CONFIG_MINSIZEREL Release)
     endif()
-    if(WIN32 AND (_sodium_static OR (Sodium_LIBRARY MATCHES "\\.a$" AND NOT Sodium_LIBRARY MATCHES "\\.dll\\.a$")))
+
+    # Static builds on Windows need SODIUM_STATIC and the bcrypt system library.
+    if(WIN32 AND (_sodium_static OR
+            (Sodium_LIBRARY MATCHES "\\.a$" AND NOT Sodium_LIBRARY MATCHES "\\.dll\\.a$")))
         set_property(TARGET Sodium::Sodium PROPERTY INTERFACE_COMPILE_DEFINITIONS SODIUM_STATIC)
         set_property(TARGET Sodium::Sodium PROPERTY INTERFACE_LINK_LIBRARIES bcrypt)
     endif()
 endif()
+
 mark_as_advanced(Sodium_INCLUDE_DIR Sodium_LIBRARY)

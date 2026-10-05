@@ -1,42 +1,85 @@
+/**
+ * @file parser.h
+ * @brief Allocation-free parser for the cvault text protocol.
+ *
+ * One request is one line terminated by LF or CRLF. Words are separated by a
+ * single ASCII space. The grammar, per command:
+ *
+ * | Line                            | Meaning                                     |
+ * |---------------------------------|---------------------------------------------|
+ * | `AUTH <user> <password>`        | Log in; the password runs to end of line.   |
+ * | `SET <key> <value>`             | Store a value; it runs to end of line.      |
+ * | `GET <key>`                     | Read a value.                               |
+ * | `DEL <key>`                     | Delete a key.                               |
+ * | `EXPIRE <key> <seconds>`        | Set a relative time to live (signed int64). |
+ * | `TTL <key>`                     | Read the remaining time to live.            |
+ * | `PING` / `QUIT`                 | Liveness check / close the connection.      |
+ *
+ * `EXPORT` and `PURGE` are reserved and answer #CV_ERR_NOT_IMPLEMENTED. The
+ * full security grammar is documented in docs/security.md.
+ */
+
 #ifndef CVAULT_PARSER_H
 #define CVAULT_PARSER_H
 
 #include "cvault/common.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
+/** Command word recognised at the start of a request line. */
 typedef enum {
-    CV_CMD_UNKNOWN = 0,
-    CV_CMD_AUTH,
-    CV_CMD_SET,
-    CV_CMD_GET,
-    CV_CMD_DEL,
-    CV_CMD_EXPIRE,
-    CV_CMD_TTL,
-    CV_CMD_EXPORT,
-    CV_CMD_PURGE,
-    CV_CMD_PING,
-    CV_CMD_QUIT
+    CV_CMD_UNKNOWN = 0, /**< Not a known command (never returned on success). */
+    CV_CMD_AUTH,        /**< Authenticate the connection. */
+    CV_CMD_SET,         /**< Store or replace a value. */
+    CV_CMD_GET,         /**< Read a value. */
+    CV_CMD_DEL,         /**< Delete a value. */
+    CV_CMD_EXPIRE,      /**< Attach a relative expiration. */
+    CV_CMD_TTL,         /**< Query the remaining lifetime. */
+    CV_CMD_EXPORT,      /**< Reserved: per-user export. */
+    CV_CMD_PURGE,       /**< Reserved: explicit expiry sweep. */
+    CV_CMD_PING,        /**< Liveness probe, allowed before authentication. */
+    CV_CMD_QUIT         /**< Ask the server to close the connection. */
 } cv_command_type;
 
+/**
+ * @brief A validated request, expressed as slices of the input line.
+ *
+ * Nothing is copied: every pointer borrows the buffer handed to
+ * cv_parse_line(). Slices are not NUL-terminated and must not be retained after
+ * the transport consumes or wipes its input buffer.
+ */
 typedef struct {
+    /** Which command was parsed. */
     cv_command_type type;
+
     /** Complete argument span, excluding the line terminator (compatibility view). */
     const unsigned char *arguments;
     size_t arguments_length;
-    /** Non-NUL-terminated slices; key is the username for AUTH. Never retain them
-     * after the transport consumes/wipes its input buffer. */
+
+    /** Key slice (the user name for AUTH) and the payload slice that follows it:
+     * the password for AUTH, the value for SET, the decimal text for EXPIRE. */
     const unsigned char *key, *value;
     size_t key_length, value_length;
-    /** Validated signed seconds for EXPIRE; zero for other commands. */
+
+    /** Validated signed seconds for EXPIRE; zero for every other command. */
     int64_t seconds;
 } cv_command;
 
-/** Parse one complete LF/CRLF line without allocation or modification.
- * Slices borrow input. Strict arity, printable ASCII keys, bounded AUTH/SET
- * payloads and signed EXPIRE seconds. Grammar documented in docs/security.md.
- * Output resets on all errors; unknown/reserved commands return NOT_IMPLEMENTED.
+/**
+ * @brief Parse one complete request line without allocating or modifying it.
+ *
+ * Enforces strict arity, printable ASCII keys (33..126), bounded AUTH and SET
+ * payloads and a well-formed signed 64-bit EXPIRE count.
+ *
+ * @param line   Input bytes including the trailing LF; embedded NUL, CR (other
+ *               than the CRLF terminator) and LF are rejected.
+ * @param length Number of bytes in @p line, at most #CV_MAX_LINE_BYTES.
+ * @param out    Receives the command; reset to all-zero on every error.
+ * @return #CV_OK on success; #CV_ERR_INVALID_ARGUMENT for malformed input;
+ *         #CV_ERR_LIMIT when a size bound is exceeded; #CV_ERR_NOT_IMPLEMENTED
+ *         for unknown or reserved command words.
  */
 cv_status cv_parse_line(const unsigned char *line, size_t length, cv_command *out);
 
-#endif
+#endif /* CVAULT_PARSER_H */

@@ -1,3 +1,8 @@
+# Continuous integration: build and test cvault on Linux, macOS and Windows.
+#
+# Every job installs the exact, checksum-verified toolchain pinned in
+# toolchain.json (see scripts/bootstrap-*), then configures, builds and runs the
+# whole CTest suite with strict warnings treated as errors.
 name: C build and tests
 
 on:
@@ -8,6 +13,8 @@ permissions:
   contents: read
 
 jobs:
+  # GCC and Clang, each with debug, release and AddressSanitizer + UBSan presets,
+  # inside a Debian container so the toolchain does not depend on the runner image.
   linux:
     runs-on: ubuntu-26.04
     container: gcc:16.2.0-trixie
@@ -56,6 +63,7 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }} --parallel
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+      # The AFL++-compatible parser harness must at least build and accept a seed input.
       - name: Build and smoke-test parser harness
         if: matrix.preset == 'debug'
         run: |
@@ -63,6 +71,7 @@ jobs:
           cmake --build build/fuzz-smoke --parallel
           ./build/fuzz-smoke/cvault-fuzz-parser < tests/fuzz/corpus/get.txt
 
+  # Apple Clang and Homebrew LLVM on Apple Silicon.
   macos:
     # The explicit macOS 26 label selects the current Apple Silicon image.
     runs-on: macos-26
@@ -112,6 +121,7 @@ jobs:
       - name: Test storage, TCP poll and POSIX fork snapshots
         run: ctest --preset ${{ matrix.preset }}
 
+  # MinGW GCC (w64devkit) and MSVC (Visual Studio 2026), Debug and Release.
   windows:
     runs-on: windows-2025-vs2026
     strategy:
