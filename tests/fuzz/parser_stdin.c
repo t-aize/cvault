@@ -1,7 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include "cvault/config.h"
 #include "cvault/parser.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 int main(void) {
     unsigned char input[CV_MAX_LINE_BYTES + 1];

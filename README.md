@@ -3,13 +3,12 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Current status: in-memory core, TCP transport and encrypted persistence implemented.**
-> The C APIs support SET, GET, DEL, EXPIRE and TTL, an authenticated append-only
-> journal, startup recovery and atomic background snapshots (POSIX fork / Windows
-> worker). The server handles multiple clients, PING/QUIT and graceful shutdown.
-> Authenticated storage command dispatch and the interactive CLI remain unfinished.
-> Persistence is opt-in with `--data` and `--key-file`; the default server creates
-> no data files. Documentation, code comments, tests and CI are in English.
+> **Current status: core, TCP transport, encrypted persistence and security implemented.**
+> The server supports authenticated SET, GET, DEL, EXPIRE and TTL, literal prefix
+> read/write permissions and a durable encrypted audit trail. Journal recovery and
+> background snapshots use POSIX fork or a Windows immutable-copy worker.
+> Configure security explicitly; the default handler exposes only PING/QUIT.
+> The interactive CLI remains unfinished. Code, documentation, tests and CI are English.
 
 ## Why this project?
 
@@ -117,7 +116,10 @@ The server accepts connections and configuration options:
 ```
 
 Send `PING\n` to receive `+PONG\n`, or `QUIT\n` to receive `+OK\n` followed by closure.
-Storage commands are rejected until command dispatch/authentication are implemented.
+Enable authenticated storage with `--security`, `--audit` and `--audit-key-file`.
+See [security setup and protocol](docs/security.md) for account provisioning, prefix
+permissions, examples and audit export. Without security configuration, storage
+commands remain rejected.
 See the [TCP transport guide](docs/network.md) for options, embedding and tests.
 See [encrypted persistence](docs/persistence.md) for `--data`, key provisioning,
 startup replay, durability, snapshot backends and the durable C API. Interactive
@@ -146,8 +148,8 @@ CLI storage commands remain planned.
 
 See the [in-memory core guide](docs/core.md) for API contracts, expiration rules,
 memory ownership, examples, complexity and test coverage. The five operations
-are implemented in the storage API; authenticated text command dispatch remains
-planned. The [TCP transport](docs/network.md) handles connections and frames;
+are implemented in the storage API and authenticated text command layer.
+The [code guide](docs/code-guide.md) explains module boundaries, ownership and style. The [TCP transport](docs/network.md) handles connections and frames;
 [encrypted persistence](docs/persistence.md) owns durable state and startup recovery.
 
 ```text
@@ -170,12 +172,12 @@ cvault/
 ├── toolchain.json    # Verified stable versions and download hashes
 ├── cmake/FindSodium.cmake
 ├── include/cvault/    # Module interfaces, limits, status codes
-├── src/              # Server entry point and module skeletons
+├── src/              # Server entry point and module implementations
 │   ├── main.c / server.c / config.c / common.c
 │   ├── parser.c / hashtable.c / crypto.c / auth.c
-│   └── persist.c / persist_codec.c / persist_io.c / audit.c
+│   └── persist.c / persist_codec.c / persist_io.c / audit.c / security_service.c
 ├── client/main.c     # CLI entry point
-├── tests/            # Core, network, persistence and dependency tests + fuzz harness
+├── tests/            # Core, network, persistence, security and dependency tests + fuzz harness
 ├── scripts/          # Local Windows/CLion, Linux and macOS setup
 ├── docs/             # Core, network, persistence, development and security guides
 └── .github/workflows/ci.yml
@@ -184,24 +186,27 @@ cvault/
 Interfaces are starting points and can evolve as each module is implemented.
 `CV_ERR_NOT_IMPLEMENTED` distinguishes unfinished operations from success.
 
-## Protocol (draft)
+## Protocol
 
-One command per line, terminated by LF (`\n`):
+One uppercase command per LF/CRLF line:
 
 ```text
-AUTH <password>
+PING
+AUTH <username> <password>
 SET <key> <value>
 GET <key>
 DEL <key>
-EXPIRE <key> <seconds>
+EXPIRE <key> <signed-seconds>
 TTL <key>
-EXPORT <prefix>
-PURGE <key>
+QUIT
 ```
 
-Replies will start with `+` (success), `-` (error) or `$` (value).
-Exact escaping, value framing, numeric bounds and export framing still need a
-specification before the parser and network layer are implemented.
+AUTH is required before storage access. Prefix grants independently authorize
+reads (GET/TTL) and writes (SET/DEL/EXPIRE). Replies use `+` for success, `-` for
+errors, `:<seconds>` for TTL and `$<length>\n<bytes>\n` for GET. The text protocol
+preserves spaces in passwords/values but cannot carry NUL/CR/LF in them; the C
+storage API remains binary-safe. EXPORT/PURGE remain reserved. See the complete
+[protocol and security contract](docs/security.md) for bounds and failure semantics.
 
 ## Security design and remaining work
 
@@ -213,9 +218,9 @@ against process-memory inspection, a compromised host or network eavesdropping
 All cryptographic primitives come from [libsodium](https://doc.libsodium.org/).
 Its [official Windows installation guide](https://doc.libsodium.org/installation)
 documents the prebuilt MinGW libraries used by the bootstrap script.
-The journal and snapshots use authenticated encryption; client authentication,
-key rotation and TLS remain unfinished. See [persistence guarantees and limits](docs/persistence.md).
-See [security notes](docs/security.md) for the implementation checklist.
+The journal, snapshots and audit stream use authenticated encryption. Argon2id
+authentication and prefix ACLs are implemented; key rotation and TLS remain unfinished. See [persistence guarantees and limits](docs/persistence.md).
+See [security notes](docs/security.md) for provisioning, guarantees and remaining limits.
 
 ## Data protection goals
 
@@ -256,12 +261,16 @@ setup-python **7.0.0** use explicit version tags; Dependabot checks
 GitHub Actions daily. Remote CI execution requires pushing the repository.
 The parser harness can be built now; see [fuzzing instructions](docs/fuzzing.md).
 
-1. Protocol specification and parser + negative/boundary tests.
-2. Authenticated command dispatch and CLI integration; schedule expired-entry sweeps.
-3. Journal compaction, storage quotas and benchmarks.
-4. Authentication, key rotation and recovery tooling.
-5. Audit log, prefix ACLs, export, purge and compaction.
-6. Full fuzzing campaigns, Valgrind and power-loss testing.
+Security tests cover real AUTH/ACL dispatch, reauthentication revocation, session
+isolation, strict grammar, persistence restart and authenticated audit export.
+Private synchronization faults prove that failed audit intents prevent mutations
+and failed audit results stop further work.
+
+1. Interactive CLI integration and expired-entry sweeps.
+2. Journal compaction, storage quotas and benchmarks.
+3. Key rotation, online policy reload and recovery tooling.
+4. Audit retention/rotation, remote sequence anchoring, export and purge.
+5. Sustained fuzzing campaigns, Valgrind and power-loss testing.
 
 ## License
 

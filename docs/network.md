@@ -7,8 +7,9 @@ on Windows. Linux also supports an explicit poll backend for comparison/testing.
 AUTO selects epoll on Linux and the available poll backend elsewhere. Explicit
 epoll on a non-Linux platform returns `CV_ERR_NOT_IMPLEMENTED`.
 
-The transport is operational. Authentication, command grammar/dispatch, database
-access are separate, unfinished modules. Encrypted persistence is available through
+The transport is operational. Authentication, command grammar/dispatch and database
+access belong to the application layer in `security_service.c`; configure it as
+documented in [security.md](security.md). Encrypted persistence is available through
 its C API and server startup options; see [persistence](persistence.md). The default handler exposes
 only PING/QUIT probes; it never reads or writes the hash table.
 
@@ -42,7 +43,9 @@ Numeric arguments reject signs, whitespace, overflow and trailing characters.
 `--help` and `--version` exit successfully without opening sockets. The executable
 also accepts `--data`, `--key-file`, `--generate-key` and `--snapshot-interval-ms`;
 see [persistence](persistence.md). Recovery completes before bind/listen, and
-a corrupt database prevents readiness. The probe handler still never accesses storage.
+a corrupt database prevents readiness. Security policy/audit recovery also completes
+before binding. The probe handler still never accesses storage; `--security` selects
+the authenticated application handler and its documented protocol.
 
 ## Current wire behavior
 
@@ -93,7 +96,9 @@ Partial sends retain an offset and resume on writable readiness. Each client has
 a 16 KiB read budget and 16 KiB write budget per iteration; reads use chunks up to
 4 KiB. Up to 16 connections are accepted per iteration, and no-response callbacks
 also have a processing budget. These limits prevent a busy peer from consuming
-unbounded work in a single tick. Callbacks must themselves be bounded/nonblocking.
+unbounded work in a single tick. Callbacks must themselves be bounded; blocking work delays all clients. The security
+handler synchronously verifies Argon2id under a global rate gate and synchronizes
+audit/storage writes, so its latency includes that work.
 This is fairness control, not a requests-per-second rate limiter.
 
 Transient interruption and would-block results preserve state for a later tick.
@@ -118,7 +123,7 @@ This guarantees bounded shutdown, rather than promising delivery to disconnected
 or non-reading peers. `cv_server_is_stopped` becomes true when all clients are gone.
 `cv_server_destroy` closes immediately and releases every allocation/socket.
 
-The executable handles Ctrl+C/SIGINT and SIGTERM. Signal handlers only set a
+The executable handles Ctrl+C/SIGINT, SIGTERM and Windows Ctrl+Break/SIGBREAK. Signal handlers only set a
 `sig_atomic_t` flag; the owner requests shutdown from normal event-loop code.
 POSIX signal handlers use sigaction. The owner checks the flag at most every
 100 ms before beginning the bounded drain. Forceful process termination, including
@@ -144,9 +149,10 @@ transport cannot sandbox arbitrary C code.
 
 All slices are borrowed only for the callback invocation. The handler context is
 borrowed for the server lifetime. Callbacks must not reenter the server. Integrate
-future session/authentication state using client IDs and an explicit ownership
-design; transport IDs alone grant no permissions. The current API does not expose
-connection lifecycle callbacks or authenticate clients. `cv_server_get_stats`
+session/authentication state using unique client IDs; transport IDs alone grant
+no permissions. `cv_server_set_disconnect_handler` registers a callback on every
+accepted peer teardown, including timeout/error/shutdown/destroy. The security
+application uses it to wipe/reclaim session slots. `cv_server_get_stats`
 provides active, accepted and rejected connection counts; output resets on errors.
 
 No API is internally synchronized. Cross-thread owners should route stop/work
@@ -182,9 +188,9 @@ configured release toolchain. CI continues to require stable GCC 16.2.0 or Clang
 The server remains a learning project, with a hard cap of 1,024 clients, fixed
 buffers and a single owner thread. Slot scanning makes each iteration O(max_clients)
 even with epoll; this is not an unbounded high-scale server. There is no TLS,
-authentication, storage command dispatch, rate limiting, DNS binding, Unix socket
-backend or interactive CLI yet. Keep the default loopback binding while building
-the authenticated command layer. The in-memory table's periodic expiration sweep
+DNS binding, Unix socket backend or interactive CLI yet. The configured security
+layer supplies AUTH, prefix-controlled storage and an authentication rate gate.
+Keep loopback binding or use an authenticated encrypted tunnel. The in-memory table's periodic expiration sweep
 belongs in that future integration; the transport currently owns no table.
 
 Reference semantics: [epoll](https://man7.org/linux/man-pages/man7/epoll.7.html),

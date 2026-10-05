@@ -1,7 +1,7 @@
-#include <sodium.h>
-#include <string.h>
 #include "cvault/crypto.h"
 #include "test_util.h"
+#include <sodium.h>
+#include <string.h>
 
 int main(void) {
     /* Dependency integration check, not a test of future cvault encryption wrappers. */
@@ -16,19 +16,37 @@ int main(void) {
     unsigned long long plaintext_length = 0;
     crypto_aead_xchacha20poly1305_ietf_keygen(key);
     randombytes_buf(nonce, sizeof(nonce));
-    CHECK(crypto_aead_xchacha20poly1305_ietf_encrypt(
-        ciphertext, &ciphertext_length, message, sizeof(message), metadata, sizeof(metadata),
-        NULL, nonce, key) == 0);
+    CHECK(crypto_aead_xchacha20poly1305_ietf_encrypt(ciphertext,
+                                                     &ciphertext_length,
+                                                     message,
+                                                     sizeof(message),
+                                                     metadata,
+                                                     sizeof(metadata),
+                                                     NULL,
+                                                     nonce,
+                                                     key) == 0);
     CHECK(ciphertext_length == sizeof(ciphertext));
-    CHECK(crypto_aead_xchacha20poly1305_ietf_decrypt(
-        plaintext, &plaintext_length, NULL, ciphertext, ciphertext_length,
-        metadata, sizeof(metadata), nonce, key) == 0);
+    CHECK(crypto_aead_xchacha20poly1305_ietf_decrypt(plaintext,
+                                                     &plaintext_length,
+                                                     NULL,
+                                                     ciphertext,
+                                                     ciphertext_length,
+                                                     metadata,
+                                                     sizeof(metadata),
+                                                     nonce,
+                                                     key) == 0);
     CHECK(plaintext_length == sizeof(message));
     CHECK(memcmp(plaintext, message, sizeof(message)) == 0);
     ciphertext[0] ^= 1;
-    CHECK(crypto_aead_xchacha20poly1305_ietf_decrypt(
-        plaintext, &plaintext_length, NULL, ciphertext, ciphertext_length,
-        metadata, sizeof(metadata), nonce, key) == -1);
+    CHECK(crypto_aead_xchacha20poly1305_ietf_decrypt(plaintext,
+                                                     &plaintext_length,
+                                                     NULL,
+                                                     ciphertext,
+                                                     ciphertext_length,
+                                                     metadata,
+                                                     sizeof(metadata),
+                                                     nonce,
+                                                     key) == -1);
     cv_crypto_wipe(key, sizeof(key));
     cv_crypto_wipe(plaintext, sizeof(plaintext));
     puts("libsodium linked: XChaCha20-Poly1305 roundtrip and tamper rejection passed.");

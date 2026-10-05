@@ -1,10 +1,10 @@
 #ifndef CVAULT_HASHTABLE_H
 #define CVAULT_HASHTABLE_H
 
+#include "cvault/common.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
-#include "cvault/common.h"
 
 /** @file
  * Owned, binary-safe storage with relative expiration. Keys are nonempty
@@ -39,8 +39,8 @@ cv_status cv_hashtable_create(cv_hashtable **out);
 /** Create with a custom clock, typically for deterministic testing.
  * NULL clock is invalid. Allocation/initialization behave as in create().
  */
-cv_status cv_hashtable_create_with_clock(cv_hashtable **out,
-                                        cv_hashtable_clock clock, void *context);
+cv_status
+cv_hashtable_create_with_clock(cv_hashtable **out, cv_hashtable_clock clock, void *context);
 
 /** Wipe keys, values and hash key before freeing. NULL is safe. */
 void cv_hashtable_destroy(cv_hashtable *table);
@@ -50,8 +50,10 @@ void cv_hashtable_destroy(cv_hashtable *table);
  * as input. Allocation failure preserves existing values/TTLs.
  * Errors: INVALID_ARGUMENT, LIMIT (input/capacity), NO_MEMORY.
  */
-cv_status cv_hashtable_set(cv_hashtable *table, const char *key,
-                           const unsigned char *value, size_t value_length);
+cv_status cv_hashtable_set(cv_hashtable *table,
+                           const char *key,
+                           const unsigned char *value,
+                           size_t value_length);
 
 /** GET returns a borrowed value, valid until the next mutation or destruction.
  * Do not modify/free it. Empty values succeed with NULL/zero. Missing/expired
@@ -59,8 +61,10 @@ cv_status cv_hashtable_set(cv_hashtable *table, const char *key,
  * Expired values are hidden immediately but retained until deletion or a sweep.
  * Time-dependent operations propagate clock errors without exposing expired data.
  */
-cv_status cv_hashtable_get(const cv_hashtable *table, const char *key,
-                           const unsigned char **value, size_t *value_length);
+cv_status cv_hashtable_get(const cv_hashtable *table,
+                           const char *key,
+                           const unsigned char **value,
+                           size_t *value_length);
 
 /** DEL wipes/removes a live entry. Missing/expired entries return NOT_FOUND;
  * an expired entry encountered here is reclaimed too.
@@ -96,10 +100,16 @@ cv_status cv_hashtable_expire_ms(cv_hashtable *table, const char *key, uint64_t 
  * expired physical entries are included with expires=true and remaining_ms=0.
  * Callback errors stop traversal. This preserves history for snapshot replay.
  */
-typedef cv_status (*cv_hashtable_visitor)(void *context, const char *key,
-    const unsigned char *value, size_t length, bool expires, uint64_t remaining_ms);
-cv_status cv_hashtable_visit(const cv_hashtable *table, bool include_expired,
-                             cv_hashtable_visitor visitor, void *context);
+typedef cv_status (*cv_hashtable_visitor)(void *context,
+                                          const char *key,
+                                          const unsigned char *value,
+                                          size_t length,
+                                          bool expires,
+                                          uint64_t remaining_ms);
+cv_status cv_hashtable_visit(const cv_hashtable *table,
+                             bool include_expired,
+                             cv_hashtable_visitor visitor,
+                             void *context);
 
 /** Deep-copy live entries, preserving exact monotonic deadlines and borrowed
  * clock/context. Resets *out on failure. The context must outlive both tables.

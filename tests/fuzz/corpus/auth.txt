@@ -1,0 +1,1 @@
+AUTH fixture-user public-test-password

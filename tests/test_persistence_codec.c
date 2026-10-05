@@ -1,11 +1,11 @@
-#include <string.h>
+#include "cvault/crypto.h"
 #include "persist_codec.h"
 #include "persist_io.h"
-#include "cvault/crypto.h"
 #include "test_util.h"
+#include <string.h>
 
-static int roundtrip(unsigned int operation, const char *name, size_t length,
-                     uint64_t expiry, cv_status expected) {
+static int roundtrip(
+    unsigned int operation, const char *name, size_t length, uint64_t expiry, cv_status expected) {
     FILE *file = tmpfile();
     CHECK(file != NULL);
     /* Fixed bytes are exclusively synthetic test material. */
@@ -46,6 +46,7 @@ int main(void) {
     CHECK(roundtrip(CV_RECORD_END, "key", 8, 0, CV_ERR_CORRUPT) == EXIT_SUCCESS);
     CHECK(roundtrip(CV_RECORD_END, "", 7, 0, CV_ERR_CORRUPT) == EXIT_SUCCESS);
     CHECK(roundtrip(CV_RECORD_END, "", 8, 1, CV_ERR_CORRUPT) == EXIT_SUCCESS);
-    puts("Persistence codec: binary roundtrips and authenticated malformed payload rejection verified.");
+    puts("Persistence codec: binary roundtrips and authenticated malformed payload rejection "
+         "verified.");
     return EXIT_SUCCESS;
 }

@@ -1,5 +1,5 @@
-#include <sodium.h>
 #include "cvault/crypto.h"
+#include <sodium.h>
 
 cv_status cv_crypto_init(void) {
     return sodium_init() < 0 ? CV_ERR_CRYPTO : CV_OK;

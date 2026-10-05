@@ -64,12 +64,12 @@ See Microsoft's [binary compatibility documentation](https://learn.microsoft.com
 
 `cvault-server` now runs a TCP listener by default. Use `--port 0` for an ephemeral
 port during development, and Ctrl+C to stop it. See [network.md](network.md) for
-transport behavior and the pending authenticated command layer.
+transport behavior and [security.md](security.md) for authenticated storage.
 
-TCP and persistence integration tests use Python 3.12+ (standard library only). If CMake cannot
+TCP, persistence and security integration tests use Python 3.12+ (standard library only). If CMake cannot
 find Python, pass `-DPython3_EXECUTABLE=/absolute/path/to/python` and reload.
 `-DCVAULT_REQUIRE_NETWORK_TESTS=ON` makes its absence a configuration error; CI
-enables this option. Without Python, TCP/persistence integration tests are skipped; C network API tests still run and CMake
+enables this option. Without Python, TCP/persistence/security integration tests are skipped; C network API tests still run and CMake
 reports that the TCP integration tests are skipped.
 
 If presets are not imported automatically, use a Ninja profile with the C compiler
@@ -195,7 +195,7 @@ Scaffold functions return `CV_ERR_NOT_IMPLEMENTED`, authorization denies access
 by default, and sensitive buffers should be wiped before freeing. Register new
 tests in `tests/CMakeLists.txt`. Use `CHECK` for checks that must stay active in
 Release builds. Current tests cover the core, TCP transport, encrypted persistence
-and dependency integration; see their dedicated guides.
+security and dependency integration; see their dedicated guides.
 
 The workflow defines six Linux combinations (GCC/Clang x Debug/Release/ASan), plus
 four Windows combinations (GCC/MSVC x Debug/Release) and six macOS combinations
@@ -204,3 +204,10 @@ four Windows combinations (GCC/MSVC x Debug/Release) and six macOS combinations
 tags; the setup selects the latest stable Python 3.x. Compilers and actual tool
 versions are printed or verified during setup. Creating the workflow does not
 execute its remote jobs.
+
+## Code readability and API documentation
+
+See [code-guide.md](code-guide.md) for the source map, ownership, command flow,
+formatting commands and maintenance invariants. Public headers document input
+bounds, borrowed/owned data, thread constraints and error behavior. Security
+provisioning and protocol examples are in [security.md](security.md).

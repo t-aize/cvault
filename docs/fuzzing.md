@@ -1,8 +1,9 @@
 # Parser fuzzing
 
-Status: the input harness and a seed corpus are ready. Full protocol parsing is
-still a TODO; no sustained AFL++ campaign or parser security claim is recorded.
-The current parser only checks pointers, total length, terminal LF and embedded NUL.
+Status: the parser, input harness and seed corpus are implemented. The parser
+validates command names/arity, key/password/value bounds, LF/CRLF framing and signed
+64-bit expiration. No sustained AFL++ campaign or parser security certification is
+recorded. See [the protocol contract](security.md).
 
 Use the verified current **AFL++ 5.03c** release. After preparing the Linux build
 tools and libsodium with `scripts/bootstrap-linux.py`, build AFL++ from its
@@ -33,7 +34,7 @@ cmake --build build/fuzz-smoke
 ./build/fuzz-smoke/cvault-fuzz-parser < tests/fuzz/corpus/get.txt
 ```
 
-As the parser is implemented, expand seeds with every command, extreme numbers,
+Expand seeds with every command, extreme numbers,
 empty values, control bytes and malformed frames. Add minimized regressions as
 normal tests. Keep passwords and real user data out of corpora and reports.
 

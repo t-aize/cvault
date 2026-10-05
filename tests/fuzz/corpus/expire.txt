@@ -1,1 +1,1 @@
-EXPIRE user:key 60
+EXPIRE tenant:key -9223372036854775808

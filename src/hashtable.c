@@ -11,13 +11,13 @@
 #include <time.h>
 #endif
 
-#include <stdbool.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sodium.h>
 #include "cvault/config.h"
 #include "cvault/crypto.h"
 #include "cvault/hashtable.h"
+#include <sodium.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define CV_INITIAL_BUCKETS ((size_t)16)
 #define CV_MS_PER_SECOND UINT64_C(1000)
@@ -78,8 +78,8 @@ static cv_status key_length(const char *key, size_t *length) {
 
 static uint64_t hash_key(const cv_hashtable *table, const char *key, size_t length) {
     unsigned char bytes[crypto_shorthash_BYTES];
-    (void)crypto_shorthash(bytes, (const unsigned char *)key,
-                         (unsigned long long)length, table->hash_key);
+    (void)crypto_shorthash(
+        bytes, (const unsigned char *)key, (unsigned long long)length, table->hash_key);
     /* Explicit byte order avoids alignment and strict-aliasing assumptions. */
     uint64_t hash = 0;
     for (size_t i = 0; i < sizeof(bytes); ++i) {
@@ -94,8 +94,8 @@ static size_t bucket_index(uint64_t hash, size_t count) {
 }
 
 /* Link-to-link lookup handles chain heads and interiors without special cases. */
-static cv_entry **find_link(const cv_hashtable *table, const char *key,
-                            size_t length, uint64_t hash) {
+static cv_entry **
+find_link(const cv_hashtable *table, const char *key, size_t length, uint64_t hash) {
     cv_entry **link = &table->buckets[bucket_index(hash, table->bucket_count)];
     while (*link != NULL) {
         if ((*link)->hash == hash && (*link)->key_length == length &&
@@ -123,8 +123,7 @@ static void remove_link(cv_hashtable *table, cv_entry **link) {
     free_entry(entry);
 }
 
-static cv_status entry_expired(const cv_hashtable *table, const cv_entry *entry,
-                               bool *expired) {
+static cv_status entry_expired(const cv_hashtable *table, const cv_entry *entry, bool *expired) {
     *expired = false;
     if (!entry->expires) {
         return CV_OK;
@@ -167,8 +166,8 @@ cv_status cv_hashtable_create(cv_hashtable **out) {
     return cv_hashtable_create_with_clock(out, platform_clock, NULL);
 }
 
-cv_status cv_hashtable_create_with_clock(cv_hashtable **out,
-                                        cv_hashtable_clock clock, void *context) {
+cv_status
+cv_hashtable_create_with_clock(cv_hashtable **out, cv_hashtable_clock clock, void *context) {
     if (out == NULL) {
         return CV_ERR_INVALID_ARGUMENT;
     }
@@ -214,8 +213,10 @@ void cv_hashtable_destroy(cv_hashtable *table) {
     free(table);
 }
 
-cv_status cv_hashtable_set(cv_hashtable *table, const char *key,
-                           const unsigned char *value, size_t value_length) {
+cv_status cv_hashtable_set(cv_hashtable *table,
+                           const char *key,
+                           const unsigned char *value,
+                           size_t value_length) {
     if (table == NULL || (value == NULL && value_length != 0)) {
         return CV_ERR_INVALID_ARGUMENT;
     }
@@ -278,8 +279,10 @@ cv_status cv_hashtable_set(cv_hashtable *table, const char *key,
     return CV_OK;
 }
 
-cv_status cv_hashtable_get(const cv_hashtable *table, const char *key,
-                           const unsigned char **value, size_t *value_length) {
+cv_status cv_hashtable_get(const cv_hashtable *table,
+                           const char *key,
+                           const unsigned char **value,
+                           size_t *value_length) {
     if (value != NULL) {
         *value = NULL;
     }
@@ -482,8 +485,10 @@ cv_status cv_hashtable_expire_ms(cv_hashtable *table, const char *key, uint64_t 
     return CV_OK;
 }
 
-cv_status cv_hashtable_visit(const cv_hashtable *table, bool include_expired,
-                             cv_hashtable_visitor visitor, void *context) {
+cv_status cv_hashtable_visit(const cv_hashtable *table,
+                             bool include_expired,
+                             cv_hashtable_visitor visitor,
+                             void *context) {
     if (table == NULL || visitor == NULL) {
         return CV_ERR_INVALID_ARGUMENT;
     }
@@ -499,8 +504,8 @@ cv_status cv_hashtable_visit(const cv_hashtable *table, bool include_expired,
                 continue;
             }
             uint64_t remaining = entry->expires && !expired ? entry->deadline_ms - now : 0;
-            status = visitor(context, entry->key, entry->value, entry->value_length,
-                             entry->expires, remaining);
+            status = visitor(
+                context, entry->key, entry->value, entry->value_length, entry->expires, remaining);
             if (status != CV_OK) {
                 return status;
             }
@@ -536,8 +541,8 @@ cv_status cv_hashtable_clone(const cv_hashtable *table, cv_hashtable **out) {
             if (status != CV_OK) {
                 break;
             }
-            cv_entry *added = *find_link(copy, entry->key, entry->key_length,
-                                         hash_key(copy, entry->key, entry->key_length));
+            cv_entry *added = *find_link(
+                copy, entry->key, entry->key_length, hash_key(copy, entry->key, entry->key_length));
             added->expires = entry->expires;
             added->deadline_ms = entry->deadline_ms;
         }

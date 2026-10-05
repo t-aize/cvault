@@ -12,7 +12,9 @@ extern size_t cv_test_wipe_failures;
 void *cv_test_malloc(size_t size);
 void *cv_test_calloc(size_t count, size_t size);
 void cv_test_free(void *pointer);
-int cv_test_shorthash(unsigned char *out, const unsigned char *input,
-                      unsigned long long length, const unsigned char *key);
+int cv_test_shorthash(unsigned char *out,
+                      const unsigned char *input,
+                      unsigned long long length,
+                      const unsigned char *key);
 
 #endif

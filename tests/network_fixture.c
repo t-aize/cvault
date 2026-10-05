@@ -1,13 +1,18 @@
+#include "cvault/server.h"
+#include "test_util.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "cvault/server.h"
-#include "test_util.h"
 
-static cv_status handler(void *context, uint64_t id, const unsigned char *line,
-    size_t length, unsigned char *response, size_t capacity, size_t *written,
-    bool *close_after) {
+static cv_status handler(void *context,
+                         uint64_t id,
+                         const unsigned char *line,
+                         size_t length,
+                         unsigned char *response,
+                         size_t capacity,
+                         size_t *written,
+                         bool *close_after) {
     bool *stop = context;
     const char *reply = "-ERR unknown\n";
     if (length == 4 && memcmp(line, "BIG\n", 4) == 0) {
@@ -67,7 +72,8 @@ static int api_checks(void) {
     CHECK(!cv_server_is_stopped(NULL) && cv_server_port(NULL) == 0);
     CHECK(strcmp(cv_server_backend_name(NULL), "none") == 0);
     cv_server_stats stats = {1, 1, 1};
-    CHECK(cv_server_get_stats(NULL, &stats) == CV_ERR_INVALID_ARGUMENT && stats.active_clients == 0);
+    CHECK(cv_server_get_stats(NULL, &stats) == CV_ERR_INVALID_ARGUMENT &&
+          stats.active_clients == 0);
     CHECK(cv_server_get_stats(NULL, NULL) == CV_ERR_INVALID_ARGUMENT);
     config.max_clients = CV_HARD_MAX_CLIENTS + 1;
     CHECK(cv_server_create(&config, NULL, NULL, &server) == CV_ERR_INVALID_ARGUMENT);
@@ -141,7 +147,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "fixture startup: %s\n", cv_status_string(status));
         return EXIT_FAILURE;
     }
-    printf("Listening on 127.0.0.1:%u (%s)\n", (unsigned int)cv_server_port(server),
+    printf("Listening on 127.0.0.1:%u (%s)\n",
+           (unsigned int)cv_server_port(server),
            cv_server_backend_name(server));
     fflush(stdout);
     while (status == CV_OK && !cv_server_is_stopped(server)) {

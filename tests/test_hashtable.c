@@ -1,9 +1,9 @@
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
 #include "cvault/config.h"
 #include "cvault/hashtable.h"
 #include "test_util.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 typedef struct {
     uint64_t now;
@@ -47,7 +47,8 @@ static int ownership_and_bounds(void) {
     CHECK(cv_hashtable_set(table, maximum_key, maximum_value, CV_MAX_VALUE_BYTES) == CV_OK);
     CHECK(cv_hashtable_get(table, maximum_key, &value, &length) == CV_OK);
     CHECK(length == CV_MAX_VALUE_BYTES && memcmp(value, maximum_value, length) == 0);
-    CHECK(cv_hashtable_set(table, maximum_key, maximum_value, CV_MAX_VALUE_BYTES + 1) == CV_ERR_LIMIT);
+    CHECK(cv_hashtable_set(table, maximum_key, maximum_value, CV_MAX_VALUE_BYTES + 1) ==
+          CV_ERR_LIMIT);
     free(maximum_value);
     char too_long[CV_MAX_KEY_BYTES + 2];
     memset(too_long, 'K', sizeof(too_long));
@@ -230,16 +231,32 @@ static int resizing_and_sweeping(void) {
     return EXIT_SUCCESS;
 }
 
-typedef struct { size_t count, expired; uint64_t remaining; cv_status status; } visit_result;
-static cv_status count_entry(void *opaque, const char *key, const unsigned char *value,
-    size_t length, bool expires, uint64_t remaining) {
-    (void)key; (void)value; (void)length;
+typedef struct {
+    size_t count, expired;
+    uint64_t remaining;
+    cv_status status;
+} visit_result;
+
+static cv_status count_entry(void *opaque,
+                             const char *key,
+                             const unsigned char *value,
+                             size_t length,
+                             bool expires,
+                             uint64_t remaining) {
+    (void)key;
+    (void)value;
+    (void)length;
     visit_result *result = opaque;
     ++result->count;
-    if (expires && remaining == 0) ++result->expired;
-    if (expires) result->remaining = remaining;
+    if (expires && remaining == 0) {
+        ++result->expired;
+    }
+    if (expires) {
+        result->remaining = remaining;
+    }
     return result->status;
 }
+
 static int persistence_helpers(void) {
     fake_time time = {100, CV_OK};
     cv_hashtable *table = NULL, *copy = NULL;
@@ -249,7 +266,8 @@ static int persistence_helpers(void) {
     time.now = 600;
     CHECK(cv_hashtable_clone(table, &copy) == CV_OK);
     CHECK(cv_hashtable_set(table, "key", NULL, 0) == CV_OK);
-    const unsigned char *value; size_t length;
+    const unsigned char *value;
+    size_t length;
     CHECK(cv_hashtable_get(copy, "key", &value, &length) == CV_OK);
     CHECK(length == 6 && memcmp(value, "secret", 6) == 0);
     visit_result result = {0, 0, 0, CV_OK};
@@ -271,7 +289,8 @@ static int persistence_helpers(void) {
     CHECK(cv_hashtable_expire_ms(copy, "key", 10) == CV_ERR_IO);
     CHECK(cv_hashtable_clone(NULL, &failed) == CV_ERR_INVALID_ARGUMENT && failed == NULL);
     CHECK(cv_hashtable_visit(table, false, NULL, NULL) == CV_ERR_INVALID_ARGUMENT);
-    cv_hashtable_destroy(copy); cv_hashtable_destroy(table);
+    cv_hashtable_destroy(copy);
+    cv_hashtable_destroy(table);
     return EXIT_SUCCESS;
 }
 

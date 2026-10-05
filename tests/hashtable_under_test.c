@@ -5,9 +5,9 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
-#include <stdlib.h>
-#include <sodium.h>
 #include "hashtable_test_hooks.h"
+#include <sodium.h>
+#include <stdlib.h>
 #define malloc cv_test_malloc
 #define calloc cv_test_calloc
 #define free cv_test_free

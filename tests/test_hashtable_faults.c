@@ -1,8 +1,8 @@
-#include <sodium.h>
-#include <string.h>
 #include "cvault/hashtable.h"
 #include "hashtable_test_hooks.h"
 #include "test_util.h"
+#include <sodium.h>
+#include <string.h>
 
 long cv_test_allocations_left = -1;
 bool cv_test_force_collisions = true;
@@ -14,6 +14,7 @@ typedef struct {
     size_t size;
     bool must_be_wiped;
 } allocation;
+
 static allocation allocations[2048];
 
 static void *track(void *pointer, size_t size, bool wipe) {
@@ -74,8 +75,10 @@ void cv_test_free(void *pointer) {
     abort();
 }
 
-int cv_test_shorthash(unsigned char *out, const unsigned char *input,
-                      unsigned long long length, const unsigned char *key) {
+int cv_test_shorthash(unsigned char *out,
+                      const unsigned char *input,
+                      unsigned long long length,
+                      const unsigned char *key) {
     if (cv_test_force_collisions) {
         memset(out, 0, crypto_shorthash_BYTES);
         return 0;
@@ -152,11 +155,13 @@ static int allocation_failures(void) {
     /* Failure at value, entry and key allocation; partial copies must be wiped. */
     for (long fail = 0; fail < 3; ++fail) {
         cv_test_allocations_left = fail;
-        CHECK(cv_hashtable_set(table, "new", (const unsigned char *)"secret", 6) == CV_ERR_NO_MEMORY);
+        CHECK(cv_hashtable_set(table, "new", (const unsigned char *)"secret", 6) ==
+              CV_ERR_NO_MEMORY);
         CHECK(cv_test_live_allocations == live);
     }
     cv_test_allocations_left = 0;
-    CHECK(cv_hashtable_set(table, "original", (const unsigned char *)"replace", 7) == CV_ERR_NO_MEMORY);
+    CHECK(cv_hashtable_set(table, "original", (const unsigned char *)"replace", 7) ==
+          CV_ERR_NO_MEMORY);
     cv_test_allocations_left = -1;
     const unsigned char *value = NULL;
     size_t length = 0;

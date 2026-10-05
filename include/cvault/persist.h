@@ -1,11 +1,11 @@
 #ifndef CVAULT_PERSIST_H
 #define CVAULT_PERSIST_H
 
+#include "cvault/common.h"
+#include "cvault/hashtable.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "cvault/common.h"
-#include "cvault/hashtable.h"
 
 /** @file Encrypted append-only storage and authenticated checkpoints.
  * One owner thread/process per directory. Use a private, trusted local directory.
@@ -49,15 +49,17 @@ cv_status cv_persist_open(const cv_persist_options *options, cv_persist **out);
  * before I/O, so allocation failure leaves disk/memory unchanged. Mutations are
  * O(live state size); this favors transactional correctness over write throughput.
  */
-cv_status cv_persist_set(cv_persist *store, const char *key,
-                         const unsigned char *value, size_t length);
+cv_status
+cv_persist_set(cv_persist *store, const char *key, const unsigned char *value, size_t length);
 
 cv_status cv_persist_delete(cv_persist *store, const char *key);
 
 cv_status cv_persist_expire(cv_persist *store, const char *key, int64_t seconds);
 
-cv_status cv_persist_get(const cv_persist *store, const char *key,
-                         const unsigned char **value, size_t *length);
+cv_status cv_persist_get(const cv_persist *store,
+                         const char *key,
+                         const unsigned char **value,
+                         size_t *length);
 
 cv_status cv_persist_ttl(const cv_persist *store, const char *key, int64_t *seconds);
 

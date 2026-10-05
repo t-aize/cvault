@@ -5,7 +5,7 @@
 #endif
 #include "cvault/persist.h"
 #include "persist_io.h"
-cv_status cv_test_sync(FILE * file);
+cv_status cv_test_sync(FILE *file);
 
 cv_status cv_test_clone(const cv_hashtable *table, cv_hashtable **out);
 

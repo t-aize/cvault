@@ -1,8 +1,8 @@
 #ifndef CVAULT_CRYPTO_H
 #define CVAULT_CRYPTO_H
 
-#include <stddef.h>
 #include "cvault/common.h"
+#include <stddef.h>
 
 /* Initialize libsodium before using any cryptographic primitive. */
 cv_status cv_crypto_init(void);

@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+/* Winsock2 must precede windows.h, which can expose the legacy Winsock API. */
 #include <windows.h>
 typedef SOCKET cv_socket;
 typedef int cv_socklen;
@@ -35,13 +36,13 @@ typedef struct pollfd cv_pollfd;
 #endif
 #endif
 
+#include "console_signals.h"
+#include "cvault/crypto.h"
+#include "cvault/server.h"
 #include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
-#include "cvault/crypto.h"
-#include "cvault/server.h"
-#include "console_signals.h"
 
 #define CV_ACCEPT_BUDGET 16
 #define CV_IO_BUDGET ((size_t)16384)
@@ -74,6 +75,7 @@ struct cv_server {
     unsigned int *ready;
     cv_server_config config;
     cv_server_handler handler;
+    cv_server_disconnect_handler disconnect;
     void *context;
     cv_server_stats stats;
     uint16_t port;
@@ -131,8 +133,7 @@ static bool nonblocking(cv_socket socket) {
 #else
     int flags = fcntl(socket, F_GETFL, 0);
     int descriptor_flags = fcntl(socket, F_GETFD, 0);
-    return flags >= 0 && descriptor_flags >= 0 &&
-           fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0 &&
+    return flags >= 0 && descriptor_flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0 &&
            fcntl(socket, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0;
 #endif
 }
@@ -146,9 +147,14 @@ static cv_io_count send_bytes(cv_socket socket, const unsigned char *bytes, size
     return send(socket, (const char *)bytes, (int)length, flags);
 }
 
-static cv_status default_handler(void *context, uint64_t id,
-    const unsigned char *line, size_t length, unsigned char *out,
-    size_t capacity, size_t *written, bool *close_after) {
+static cv_status default_handler(void *context,
+                                 uint64_t id,
+                                 const unsigned char *line,
+                                 size_t length,
+                                 unsigned char *out,
+                                 size_t capacity,
+                                 size_t *written,
+                                 bool *close_after) {
     (void)context;
     (void)id;
     const char *reply = "-ERR command dispatch not implemented\n";
@@ -178,6 +184,9 @@ static void drop_peer(cv_server *server, size_t index) {
         (void)epoll_ctl(server->epoll_fd, EPOLL_CTL_DEL, peer->socket, NULL);
     }
 #endif
+    if (server->disconnect) {
+        server->disconnect(server->context, peer->id);
+    }
     (void)cv_close_socket(peer->socket);
     cv_crypto_wipe(peer->buffer, CV_CLIENT_BUFFER_BYTES);
     free(peer->buffer);
@@ -221,9 +230,14 @@ static void prepare_peer(cv_server *server, size_t index, uint64_t now) {
         }
         size_t written = 0;
         bool close_after = false;
-        cv_status status = server->handler(server->context, peer->id, peer->buffer,
-            length, peer->buffer + CV_MAX_LINE_BYTES, CV_MAX_RESPONSE_BYTES,
-            &written, &close_after);
+        cv_status status = server->handler(server->context,
+                                           peer->id,
+                                           peer->buffer,
+                                           length,
+                                           peer->buffer + CV_MAX_LINE_BYTES,
+                                           CV_MAX_RESPONSE_BYTES,
+                                           &written,
+                                           &close_after);
         if (status != CV_OK || written > CV_MAX_RESPONSE_BYTES) {
             frame_error(peer, "-ERR handler failed\n");
             break;
@@ -257,8 +271,8 @@ static void receive_peer(cv_server *server, size_t index, uint64_t now) {
             frame_error(peer, "-ERR frame too large\n");
             break;
         }
-        cv_io_count received = recv(peer->socket, (char *)peer->buffer + peer->input_length,
-                                   (int)capacity, 0);
+        cv_io_count received =
+            recv(peer->socket, (char *)peer->buffer + peer->input_length, (int)capacity, 0);
         if (received > 0) {
             if (peer->input_length == 0) {
                 peer->partial_since = now;
@@ -291,8 +305,8 @@ static void transmit_peer(cv_server *server, size_t index, uint64_t now) {
         if (count > budget) {
             count = budget;
         }
-        cv_io_count sent = send_bytes(peer->socket,
-            peer->buffer + CV_MAX_LINE_BYTES + peer->output_offset, count);
+        cv_io_count sent =
+            send_bytes(peer->socket, peer->buffer + CV_MAX_LINE_BYTES + peer->output_offset, count);
         if (sent > 0) {
             peer->output_offset += (size_t)sent;
             budget -= (size_t)sent;
@@ -336,7 +350,10 @@ static cv_status accept_peers(cv_server *server, uint64_t now) {
         unsigned char *buffer = NULL;
         int low_latency = 1;
         if (index < server->config.max_clients && nonblocking(socket) &&
-            setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&low_latency,
+            setsockopt(socket,
+                       IPPROTO_TCP,
+                       TCP_NODELAY,
+                       (const char *)&low_latency,
                        (cv_socklen)sizeof(low_latency)) == 0) {
 #ifdef SO_NOSIGPIPE
             int enabled = 1;
@@ -418,8 +435,8 @@ static cv_status wait_events(cv_server *server, int timeout, bool *listener_read
                 peer->watched = interest;
             }
         }
-        int count = epoll_wait(server->epoll_fd, server->events,
-                               (int)server->config.max_clients + 1, timeout);
+        int count = epoll_wait(
+            server->epoll_fd, server->events, (int)server->config.max_clients + 1, timeout);
         if (count < 0) {
             return interrupted() ? CV_OK : CV_ERR_IO;
         }
@@ -515,24 +532,26 @@ static int timer_wait(int requested, uint64_t now, uint64_t start, uint32_t dura
 }
 
 static bool peer_timed_out(const cv_server *server, const cv_peer *peer, uint64_t now) {
-    bool partial = peer->input_length != 0 &&
-                   memchr(peer->buffer, '\n', peer->input_length) == NULL;
+    bool partial =
+        peer->input_length != 0 && memchr(peer->buffer, '\n', peer->input_length) == NULL;
     return now - peer->last_progress >= server->config.idle_timeout_ms ||
            (partial && now - peer->partial_since >= server->config.frame_timeout_ms);
 }
 
-cv_status cv_server_create(const cv_server_config *config, cv_server_handler handler,
-                          void *context, cv_server **out) {
+cv_status cv_server_create(const cv_server_config *config,
+                           cv_server_handler handler,
+                           void *context,
+                           cv_server **out) {
     if (out == NULL) {
         return CV_ERR_INVALID_ARGUMENT;
     }
     *out = NULL;
-    if (config == NULL || config->bind_address == NULL ||
-        config->max_clients == 0 || config->max_clients > CV_HARD_MAX_CLIENTS ||
-        config->idle_timeout_ms == 0 || config->idle_timeout_ms > INT_MAX ||
-        config->frame_timeout_ms == 0 || config->frame_timeout_ms > INT_MAX ||
-        config->shutdown_timeout_ms == 0 || config->shutdown_timeout_ms > INT_MAX ||
-        config->backend < CV_NETWORK_AUTO || config->backend > CV_NETWORK_EPOLL) {
+    if (config == NULL || config->bind_address == NULL || config->max_clients == 0 ||
+        config->max_clients > CV_HARD_MAX_CLIENTS || config->idle_timeout_ms == 0 ||
+        config->idle_timeout_ms > INT_MAX || config->frame_timeout_ms == 0 ||
+        config->frame_timeout_ms > INT_MAX || config->shutdown_timeout_ms == 0 ||
+        config->shutdown_timeout_ms > INT_MAX || config->backend < CV_NETWORK_AUTO ||
+        config->backend > CV_NETWORK_EPOLL) {
         return CV_ERR_INVALID_ARGUMENT;
     }
 #ifndef __linux__
@@ -606,12 +625,18 @@ cv_status cv_server_create(const cv_server_config *config, cv_server_handler han
 #else
     int reuse_option = SO_REUSEADDR;
 #endif
-    if (setsockopt(server->listener, SOL_SOCKET, reuse_option,
-                   (const char *)&enabled, (cv_socklen)sizeof(enabled)) != 0) {
+    if (setsockopt(server->listener,
+                   SOL_SOCKET,
+                   reuse_option,
+                   (const char *)&enabled,
+                   (cv_socklen)sizeof(enabled)) != 0) {
         goto failure;
     }
-    if (family == AF_INET6 && setsockopt(server->listener, IPPROTO_IPV6, IPV6_V6ONLY,
-        (const char *)&enabled, (cv_socklen)sizeof(enabled)) != 0) {
+    if (family == AF_INET6 && setsockopt(server->listener,
+                                         IPPROTO_IPV6,
+                                         IPV6_V6ONLY,
+                                         (const char *)&enabled,
+                                         (cv_socklen)sizeof(enabled)) != 0) {
         goto failure;
     }
     if (bind(server->listener, (struct sockaddr *)&address, address_length) != 0 ||
@@ -661,8 +686,8 @@ cv_status cv_server_step(cv_server *server, int timeout_ms) {
         if (peer->socket == CV_INVALID_SOCKET) {
             continue;
         }
-        bool partial = peer->input_length != 0 &&
-                       memchr(peer->buffer, '\n', peer->input_length) == NULL;
+        bool partial =
+            peer->input_length != 0 && memchr(peer->buffer, '\n', peer->input_length) == NULL;
         if (peer_timed_out(server, peer, now)) {
             drop_peer(server, i);
             continue;
@@ -673,7 +698,8 @@ cv_status cv_server_step(cv_server *server, int timeout_ms) {
         }
         timeout = timer_wait(timeout, now, peer->last_progress, server->config.idle_timeout_ms);
         if (partial) {
-            timeout = timer_wait(timeout, now, peer->partial_since, server->config.frame_timeout_ms);
+            timeout =
+                timer_wait(timeout, now, peer->partial_since, server->config.frame_timeout_ms);
         }
         if (peer->output_length == 0 && memchr(peer->buffer, '\n', peer->input_length) != NULL) {
             timeout = 0;
@@ -820,6 +846,7 @@ void cv_server_destroy(cv_server *server) {
 }
 
 static volatile sig_atomic_t console_stop = 0;
+
 static void console_signal(int signal_number) {
     (void)signal_number;
     console_stop = 1;
@@ -850,4 +877,13 @@ cv_status cv_server_run(const cv_server_config *config) {
     }
     cv_server_destroy(server);
     return status;
+}
+
+cv_status cv_server_set_disconnect_handler(cv_server *server,
+                                           cv_server_disconnect_handler handler) {
+    if (!server) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+    server->disconnect = handler;
+    return CV_OK;
 }

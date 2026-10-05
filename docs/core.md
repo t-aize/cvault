@@ -3,9 +3,9 @@
 The storage API implements `SET`, `GET`, `DEL`, `EXPIRE` and `TTL`. Its public
 interface is documented in [`include/cvault/hashtable.h`](../include/cvault/hashtable.h);
 the implementation lives in [`src/hashtable.c`](../src/hashtable.c). These are C
-operations, ready for future command dispatch. The parser, authenticated dispatch
-and persistence modules are still placeholders. The [TCP transport](network.md)
-now accepts clients and frames but does not access the table yet.
+operations, also exposed through [authenticated TCP dispatch](security.md).
+The application selects this in-memory table or the [durable store](persistence.md);
+the [TCP transport](network.md) owns framing and connection lifetimes.
 
 ## Ownership and input bounds
 

@@ -1,14 +1,15 @@
 #ifndef CVAULT_CONSOLE_SIGNALS_H
 #define CVAULT_CONSOLE_SIGNALS_H
 
-#include <stdbool.h>
 #include <signal.h>
+#include <stdbool.h>
 
 /* Private console adapter. Embedders keep control of process-wide signal state. */
 typedef struct {
 #ifdef _WIN32
     void (*interrupt_handler)(int);
     void (*terminate_handler)(int);
+    void (*break_handler)(int);
 #else
     struct sigaction interrupt_action;
     struct sigaction terminate_action;
@@ -24,6 +25,15 @@ static bool cv_console_install(cv_console_signals *previous, void (*handler)(int
     previous->terminate_handler = signal(SIGTERM, handler);
     if (previous->terminate_handler == SIG_ERR) {
         (void)signal(SIGINT, previous->interrupt_handler);
+        return false;
+    }
+    /* Windows process groups receive CTRL_BREAK_EVENT as SIGBREAK. Handling it
+     * lets services and integration tests drain connections and synchronize
+     * checkpoints/audit records instead of terminating abruptly. */
+    previous->break_handler = signal(SIGBREAK, handler);
+    if (previous->break_handler == SIG_ERR) {
+        (void)signal(SIGINT, previous->interrupt_handler);
+        (void)signal(SIGTERM, previous->terminate_handler);
         return false;
     }
 #else
@@ -45,6 +55,7 @@ static void cv_console_restore(const cv_console_signals *previous) {
 #ifdef _WIN32
     (void)signal(SIGINT, previous->interrupt_handler);
     (void)signal(SIGTERM, previous->terminate_handler);
+    (void)signal(SIGBREAK, previous->break_handler);
 #else
     (void)sigaction(SIGINT, &previous->interrupt_action, NULL);
     (void)sigaction(SIGTERM, &previous->terminate_action, NULL);

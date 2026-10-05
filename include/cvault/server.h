@@ -16,12 +16,17 @@ typedef struct cv_server cv_server;
  * client_id is unique within this server. Input/output slices are borrowed for
  * this call only. Write at most response_capacity bytes and fill response_length.
  * close_after_response requests orderly closure after the response is sent.
- * The callback must be bounded/nonblocking; errors close only this client.
+ * The callback must be bounded; blocking work delays all clients; errors close only this client.
  * NULL handler selects PING/QUIT probes and rejects all storage commands.
  */
-typedef cv_status (*cv_server_handler)(void *context, uint64_t client_id,
-    const unsigned char *line, size_t line_length, unsigned char *response,
-    size_t response_capacity, size_t *response_length, bool *close_after_response);
+typedef cv_status (*cv_server_handler)(void *context,
+                                       uint64_t client_id,
+                                       const unsigned char *line,
+                                       size_t line_length,
+                                       unsigned char *response,
+                                       size_t response_capacity,
+                                       size_t *response_length,
+                                       bool *close_after_response);
 
 typedef struct {
     size_t active_clients;
@@ -34,8 +39,17 @@ typedef struct {
  * Handler context is borrowed until destroy. Resets *out on failure.
  * Errors: INVALID_ARGUMENT, NO_MEMORY, IO, NOT_IMPLEMENTED (unavailable backend).
  */
-cv_status cv_server_create(const cv_server_config *config, cv_server_handler handler,
-                          void *context, cv_server **out);
+cv_status cv_server_create(const cv_server_config *config,
+                           cv_server_handler handler,
+                           void *context,
+                           cv_server **out);
+
+/** Optional disconnect notification, including timeout/error/shutdown/destroy.
+ * Called on the owner thread, once per accepted peer. Must not reenter server.
+ * Context is shared with the command handler and borrowed until destroy.
+ */
+typedef void (*cv_server_disconnect_handler)(void *context, uint64_t client_id);
+cv_status cv_server_set_disconnect_handler(cv_server *server, cv_server_disconnect_handler handler);
 
 /** One bounded event-loop iteration. timeout_ms is 0..INT_MAX milliseconds;
  * timer deadlines may shorten it. EINTR is a successful, nonfatal iteration.

@@ -66,6 +66,7 @@ __pycache__/
 
 # Runtime data and secrets (never commit)
 /data/
+/runtime/
 *.aof
 *.snapshot
 *.cvs

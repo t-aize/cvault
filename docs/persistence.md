@@ -5,8 +5,9 @@ atomic snapshots. It restores state before the server binds its listening socket
 Both file types encrypt user keys and binary values with libsodium's
 [XChaCha20-Poly1305 AEAD](https://doc.libsodium.org/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction).
 The public interface and ownership/error contracts are in `include/cvault/persist.h`.
-Authentication and text storage-command dispatch remain unfinished: PING/QUIT do
-not access this database. Embedders use the durable C API directly.
+Configure [the security layer](security.md) to expose authenticated storage commands
+over TCP. The default PING/QUIT handler never accesses this database. Embedders can
+also use the durable C API directly.
 
 ## Enable storage
 
