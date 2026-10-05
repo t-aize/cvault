@@ -86,13 +86,18 @@ if(WIN32)
     target_link_libraries(cvault_core PRIVATE ws2_32 advapi32)
 endif()
 
+# Vendored command-line parser (see third_party/README.md). It is built without
+# the strict project warning flags because the code is kept identical to upstream.
+add_library(cvault_argparse STATIC third_party/argparse/argparse.c)
+target_include_directories(cvault_argparse PUBLIC third_party/argparse)
+
 # Executables.
 add_executable(cvault-server src/main.c)
-target_link_libraries(cvault-server PRIVATE cvault_core cvault_options)
+target_link_libraries(cvault-server PRIVATE cvault_core cvault_argparse cvault_options)
 cvault_copy_runtime(cvault-server)
 
 add_executable(cvault-cli client/main.c)
-target_link_libraries(cvault-cli PRIVATE cvault_core cvault_options)
+target_link_libraries(cvault-cli PRIVATE cvault_core cvault_argparse cvault_options)
 cvault_copy_runtime(cvault-cli)
 
 if(BUILD_TESTING)

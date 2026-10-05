@@ -174,6 +174,7 @@ cvault/
 ├── CMakeLists.txt / CMakePresets.json / Makefile
 ├── toolchain.json    # Verified stable versions and download hashes
 ├── cmake/FindSodium.cmake
+├── third_party/      # Vendored argparse (MIT), pinned to an upstream commit
 ├── include/cvault/    # Module interfaces, limits, status codes
 ├── src/              # Server entry point and module implementations
 │   ├── main.c / server.c / config.c / common.c
@@ -274,6 +275,12 @@ and failed audit results stop further work.
 3. Key rotation, online policy reload and recovery tooling.
 4. Audit retention/rotation, remote sequence anchoring, export and purge.
 5. Sustained fuzzing campaigns, Valgrind and power-loss testing.
+
+## Third-party code
+
+Command-line parsing uses [cofyc/argparse](https://github.com/cofyc/argparse) (MIT),
+vendored in [`third_party/`](third_party/README.md) at commit `4e30aba` (2025-09-26),
+the latest upstream revision. Cryptography comes from libsodium (see above).
 
 ## License
 

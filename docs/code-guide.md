@@ -9,7 +9,7 @@ and [security](security.md) describe runtime behavior and deployment.
 
 | Files | Responsibility |
 |---|---|
-| `main.c` | CLI validation, provisioning, startup, event loop, snapshot scheduling and shutdown |
+| `main.c` | Option parsing (argparse) and validation, provisioning commands, startup, event loop, snapshot scheduling and shutdown |
 | `server.c` | Socket ownership, bounded framing, backpressure, poll/epoll readiness and deadlines |
 | `parser.c` | Allocation-free grammar, bounded borrowed slices and signed integer validation |
 | `security_service.c` | Per-connection sessions, AUTH throttling, ACL-before-storage dispatch and fail-closed audit ordering |
@@ -21,6 +21,7 @@ and [security](security.md) describe runtime behavior and deployment.
 | `persist_io.c` | Private files/locks, platform permissions, synchronization and atomic publication |
 | `crypto.c`, `common.c`, `config.c` | Shared crypto initialization/wiping, status strings and defaults |
 
+`third_party/argparse` is vendored upstream code (see its README) and is never reformatted.
 Private headers in `src/` support implementation collaboration; callers should use
 the contracts in `include/cvault/`. The CLI client remains a guarded scaffold.
 Test fixtures are separate executables: production servers expose no fault-injection

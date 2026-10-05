@@ -4,7 +4,9 @@
  *
  * Besides starting the server, the executable offers a few one-shot
  * maintenance modes that exit immediately: `--help`, `--version`,
- * `--generate-key`, `--hash-password` and `--dump-audit`.
+ * `--generate-key`, `--hash-password` and `--dump-audit`. Options are parsed by
+ * the vendored argparse library (see third_party/README.md); numeric values are
+ * validated here with a strict decimal parser.
  *
  * Start-up order when serving:
  *  1. Parse and validate every option.
@@ -33,6 +35,7 @@
 #include <windows.h>
 #endif
 
+#include "argparse.h"
 #include "console_signals.h"
 #include "cvault/audit.h"
 #include "cvault/crypto.h"
@@ -73,6 +76,174 @@ static uint64_t scheduling_ms(void) {
 }
 
 /**
+ * @brief Raw command-line values.
+ *
+ * Text options are NULL when they were not given, which lets the program tell
+ * "absent" from "present with a default-looking value". Numbers stay text until
+ * validated by parse_number().
+ */
+typedef struct {
+    int version;                      /* --version */
+    int hash_password;                /* --hash-password */
+    const char *generate_key;         /* --generate-key FILE */
+    const char *dump_audit;           /* --dump-audit FILE */
+    const char *bind;                 /* --bind ADDRESS */
+    const char *port;                 /* --port PORT */
+    const char *max_clients;          /* --max-clients COUNT */
+    const char *backend;              /* --backend auto|poll|epoll */
+    const char *idle_timeout_ms;      /* --idle-timeout-ms MS */
+    const char *frame_timeout_ms;     /* --frame-timeout-ms MS */
+    const char *shutdown_timeout_ms;  /* --shutdown-timeout-ms MS */
+    const char *data;                 /* --data DIRECTORY */
+    const char *key_file;             /* --key-file FILE */
+    const char *snapshot_interval_ms; /* --snapshot-interval-ms MS */
+    const char *security;             /* --security FILE */
+    const char *audit;                /* --audit FILE */
+    const char *audit_key_file;       /* --audit-key-file FILE */
+} cli_options;
+
+/**
+ * @brief Parse the command line into @p options.
+ *
+ * argparse prints the help text itself for `--help`, and reports unknown options
+ * and missing values on stderr before exiting with status 1. Positional
+ * arguments are never valid for this program.
+ *
+ * @return true when the command line is well formed.
+ */
+static bool parse_arguments(int argc, char **argv, cli_options *options) {
+    static const char *const usages[] = {"cvault-server [options]", NULL};
+    struct argparse_option definitions[] = {
+        OPT_HELP(),
+        OPT_BOOLEAN(
+            0, "version", &options->version, "print the version and exit", NULL, 0, OPT_NONEG),
+
+        OPT_GROUP("Network"),
+        OPT_STRING(
+            0, "bind", &options->bind, "numeric IPv4/IPv6 address (default 127.0.0.1)", NULL, 0, 0),
+        OPT_STRING(
+            0, "port", &options->port, "TCP port, 0 for ephemeral (default 6380)", NULL, 0, 0),
+        OPT_STRING(0,
+                   "max-clients",
+                   &options->max_clients,
+                   "connection limit, 1..1024 (default 128)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(
+            0, "backend", &options->backend, "auto, poll or epoll (default auto)", NULL, 0, 0),
+        OPT_STRING(0,
+                   "idle-timeout-ms",
+                   &options->idle_timeout_ms,
+                   "idle connection deadline (default 30000)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "frame-timeout-ms",
+                   &options->frame_timeout_ms,
+                   "incomplete frame deadline (default 5000)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "shutdown-timeout-ms",
+                   &options->shutdown_timeout_ms,
+                   "response drain deadline (default 2000)",
+                   NULL,
+                   0,
+                   0),
+
+        OPT_GROUP("Persistence"),
+        OPT_STRING(0,
+                   "data",
+                   &options->data,
+                   "enable encrypted persistence in this directory (needs --key-file)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "key-file",
+                   &options->key_file,
+                   "existing private 32-byte encryption key",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "snapshot-interval-ms",
+                   &options->snapshot_interval_ms,
+                   "background checkpoint interval (default 60000)",
+                   NULL,
+                   0,
+                   0),
+
+        OPT_GROUP("Security"),
+        OPT_STRING(0,
+                   "security",
+                   &options->security,
+                   "private credential and prefix policy file",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "audit",
+                   &options->audit,
+                   "encrypted audit stream (required with --security)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "audit-key-file",
+                   &options->audit_key_file,
+                   "separate private 32-byte audit master key",
+                   NULL,
+                   0,
+                   0),
+
+        OPT_GROUP("Maintenance commands (run once, then exit)"),
+        OPT_STRING(0,
+                   "generate-key",
+                   &options->generate_key,
+                   "create a new key file and exit; never overwrites",
+                   NULL,
+                   0,
+                   0),
+        OPT_BOOLEAN(0,
+                    "hash-password",
+                    &options->hash_password,
+                    "read a password from stdin and print its Argon2id hash",
+                    NULL,
+                    0,
+                    OPT_NONEG),
+        OPT_STRING(0,
+                   "dump-audit",
+                   &options->dump_audit,
+                   "verify and export this audit file as JSON Lines (needs --audit-key-file, "
+                   "server stopped)",
+                   NULL,
+                   0,
+                   0),
+        OPT_END(),
+    };
+    struct argparse parser;
+
+    argparse_init(&parser, definitions, usages, 0);
+    argparse_describe(&parser,
+                      "\nA small encrypted key-value store served over TCP.",
+                      "\nTCP transport: AUTH and prefix-controlled storage with --security; "
+                      "otherwise PING/QUIT probes only.");
+
+    /* argparse returns the number of leftover positional arguments. */
+    if (argparse_parse(&parser, argc, (const char **)argv) != 0) {
+        fputs("cvault-server: unexpected argument. See --help.\n", stderr);
+
+        return false;
+    }
+
+    return true;
+}
+
+/**
  * @brief Parse an unsigned decimal option value.
  *
  * Strict parsing rejects signs, whitespace, trailing junk and overflow.
@@ -103,6 +274,95 @@ static bool parse_number(const char *text, unsigned long maximum, unsigned long 
     }
 
     *out = value;
+
+    return true;
+}
+
+/**
+ * @brief Read a numeric option, keeping @p value unchanged when it is absent.
+ *
+ * @param name       Option name for the error message (without dashes).
+ * @param text       Option text, or NULL when the option was not given.
+ * @param maximum    Largest accepted value.
+ * @param allow_zero Whether zero is acceptable (only the port allows it).
+ * @param value      Receives the number when the option is present.
+ * @return false (after printing a message) when the text is invalid.
+ */
+static bool read_number(const char *name,
+                        const char *text,
+                        unsigned long maximum,
+                        bool allow_zero,
+                        unsigned long *value) {
+    if (!text) {
+        return true;
+    }
+
+    unsigned long number = 0;
+
+    if (!parse_number(text, maximum, &number) || (number == 0 && !allow_zero)) {
+        fprintf(stderr, "cvault-server: invalid value for --%s. See --help.\n", name);
+
+        return false;
+    }
+
+    *value = number;
+
+    return true;
+}
+
+/**
+ * @brief Build the server configuration from the parsed options.
+ *
+ * @param options           Parsed command line.
+ * @param config            Starts at the defaults and receives the overrides.
+ * @param snapshot_interval Receives the snapshot interval in milliseconds.
+ * @return false (after printing a message) when any value is invalid.
+ */
+static bool
+build_config(const cli_options *options, cv_server_config *config, uint32_t *snapshot_interval) {
+    unsigned long port = config->port, clients = config->max_clients;
+    unsigned long idle = config->idle_timeout_ms, frame = config->frame_timeout_ms;
+    unsigned long shutdown = config->shutdown_timeout_ms, interval = *snapshot_interval;
+
+    if (!read_number("port", options->port, UINT16_MAX, true, &port) ||
+        !read_number("max-clients",
+                     options->max_clients,
+                     (unsigned long)CV_HARD_MAX_CLIENTS,
+                     false,
+                     &clients) ||
+        !read_number("idle-timeout-ms", options->idle_timeout_ms, INT_MAX, false, &idle) ||
+        !read_number("frame-timeout-ms", options->frame_timeout_ms, INT_MAX, false, &frame) ||
+        !read_number(
+            "shutdown-timeout-ms", options->shutdown_timeout_ms, INT_MAX, false, &shutdown) ||
+        !read_number(
+            "snapshot-interval-ms", options->snapshot_interval_ms, INT_MAX, false, &interval)) {
+        return false;
+    }
+
+    config->port = (uint16_t)port;
+    config->max_clients = (size_t)clients;
+    config->idle_timeout_ms = (uint32_t)idle;
+    config->frame_timeout_ms = (uint32_t)frame;
+    config->shutdown_timeout_ms = (uint32_t)shutdown;
+    *snapshot_interval = (uint32_t)interval;
+
+    if (options->bind) {
+        config->bind_address = options->bind;
+    }
+
+    if (options->backend) {
+        if (strcmp(options->backend, "auto") == 0) {
+            config->backend = CV_NETWORK_AUTO;
+        } else if (strcmp(options->backend, "poll") == 0) {
+            config->backend = CV_NETWORK_POLL;
+        } else if (strcmp(options->backend, "epoll") == 0) {
+            config->backend = CV_NETWORK_EPOLL;
+        } else {
+            fputs("cvault-server: invalid network backend. See --help.\n", stderr);
+
+            return false;
+        }
+    }
 
     return true;
 }
@@ -251,73 +511,77 @@ static int dump_audit(const char *audit_path, const char *key_path) {
     return result == CV_OK ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-/** @brief Print the `--help` text. */
-static void print_usage(void) {
-    puts("Usage: cvault-server [options]\n"
-         "  --bind ADDRESS          Numeric IPv4/IPv6 address (default 127.0.0.1)\n"
-         "  --port PORT             TCP port, 0 for ephemeral (default 6380)\n"
-         "  --max-clients COUNT     Connection limit, 1..1024 (default 128)\n"
-         "  --backend auto|poll|epoll\n"
-         "  --idle-timeout-ms MS    Idle connection deadline (default 30000)\n"
-         "  --frame-timeout-ms MS   Incomplete frame deadline (default 5000)\n"
-         "  --shutdown-timeout-ms MS  Response drain deadline (default 2000)\n"
-         "  --data DIRECTORY        Enable encrypted persistence (with --key-file)\n"
-         "  --key-file FILE         Existing private 32-byte encryption key\n"
-         "  --snapshot-interval-ms MS  Background checkpoint interval (default 60000)\n"
-         "  --generate-key FILE     Create a new key and exit; never overwrite\n"
-         "  --security FILE         Private credential/prefix policy\n"
-         "  --audit FILE            Encrypted audit stream (required with --security)\n"
-         "  --audit-key-file FILE   Separate private 32-byte audit master key\n"
-         "  --hash-password         Read password from stdin; print Argon2id hash\n"
-         "  --dump-audit FILE --audit-key-file FILE  Verify/export JSON Lines; server stopped\n"
-         "  --help | --version\n"
-         "TCP transport: AUTH and prefix-controlled storage with --security; otherwise "
-         "PING/QUIT probes only.");
+/** @brief True when any option that only makes sense for a running server was given. */
+static bool has_serving_options(const cli_options *options) {
+    return options->bind || options->port || options->max_clients || options->backend ||
+           options->idle_timeout_ms || options->frame_timeout_ms || options->shutdown_timeout_ms ||
+           options->data || options->key_file || options->snapshot_interval_ms ||
+           options->security || options->audit;
 }
 
-int main(int argc, char **argv) {
-    /* One-shot modes that exit immediately. */
-    if (argc == 2 && strcmp(argv[1], "--hash-password") == 0) {
-        /* Catch interruption while terminal echo is disabled. The normal read
-         * error path restores terminal state and wipes the password buffer. */
-        cv_console_signals previous;
+/**
+ * @brief Check the combination of options.
+ *
+ * Persistence and security each need all of their options. A maintenance
+ * command stands alone: it cannot be combined with another command or with
+ * server options.
+ *
+ * @param maintenance Set to true when a maintenance command was requested.
+ * @return false (after printing a message) for an invalid combination.
+ */
+static bool check_combinations(const cli_options *options, bool *maintenance) {
+    int commands = (options->version != 0) + (options->hash_password != 0) +
+                   (options->generate_key != NULL) + (options->dump_audit != NULL);
 
-        if (!cv_console_install(&previous, handle_signal)) {
-            return EXIT_FAILURE;
-        }
+    *maintenance = commands != 0;
 
-        int result = hash_password();
+    if (commands > 1 || (commands == 1 && has_serving_options(options)) ||
+        (commands == 1 && options->audit_key_file && !options->dump_audit)) {
+        fputs("cvault-server: a maintenance command cannot be combined with other options. "
+              "See --help.\n",
+              stderr);
 
-        cv_console_restore(&previous);
-
-        return result;
+        return false;
     }
 
-    if (argc == 5 && strcmp(argv[1], "--dump-audit") == 0 &&
-        strcmp(argv[3], "--audit-key-file") == 0) {
-        return dump_audit(argv[2], argv[4]);
+    if (options->dump_audit && !options->audit_key_file) {
+        fputs("cvault-server: --dump-audit requires --audit-key-file. See --help.\n", stderr);
+
+        return false;
     }
 
-    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-        print_usage();
-
-        return EXIT_SUCCESS;
+    if (commands != 0) {
+        return true;
     }
 
-    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    if ((options->data == NULL) != (options->key_file == NULL) ||
+        (options->snapshot_interval_ms && !options->data)) {
+        fputs("Persistence requires --data and --key-file together. See --help.\n", stderr);
+
+        return false;
+    }
+
+    if ((options->security || options->audit || options->audit_key_file) &&
+        !(options->security && options->audit && options->audit_key_file)) {
+        fputs("Security requires --security, --audit and --audit-key-file together. See --help.\n",
+              stderr);
+
+        return false;
+    }
+
+    return true;
+}
+
+/** @brief Run one of the maintenance commands and return the process exit code. */
+static int run_maintenance(const cli_options *options) {
+    if (options->version) {
         puts("cvault-server " CVAULT_VERSION);
 
         return EXIT_SUCCESS;
     }
 
-    cv_server_config config = cv_server_config_default();
-    const char *directory = NULL, *key_path = NULL;
-    const char *policy_path = NULL, *audit_path = NULL, *audit_key = NULL;
-    uint32_t snapshot_interval = 60000;
-    bool interval_given = false;
-
-    if (argc == 3 && strcmp(argv[1], "--generate-key") == 0) {
-        cv_status result = cv_persist_key_generate(argv[2]);
+    if (options->generate_key) {
+        cv_status result = cv_persist_key_generate(options->generate_key);
 
         if (result != CV_OK) {
             fprintf(stderr, "cvault-server: %s\n", cv_status_string(result));
@@ -326,95 +590,31 @@ int main(int argc, char **argv) {
         return result == CV_OK ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
-    /* Options are strict `--name value` pairs. */
-    for (int i = 1; i < argc; i += 2) {
-        if (i + 1 >= argc) {
-            fputs("Missing option value. See --help.\n", stderr);
-
-            return EXIT_FAILURE;
-        }
-
-        const char *option = argv[i];
-        const char *value = argv[i + 1];
-
-        if (strcmp(option, "--bind") == 0) {
-            config.bind_address = value;
-        } else if (strcmp(option, "--data") == 0) {
-            directory = value;
-        } else if (strcmp(option, "--key-file") == 0) {
-            key_path = value;
-        } else if (strcmp(option, "--security") == 0) {
-            policy_path = value;
-        } else if (strcmp(option, "--audit") == 0) {
-            audit_path = value;
-        } else if (strcmp(option, "--audit-key-file") == 0) {
-            audit_key = value;
-        } else if (strcmp(option, "--backend") == 0) {
-            if (strcmp(value, "auto") == 0) {
-                config.backend = CV_NETWORK_AUTO;
-            } else if (strcmp(value, "poll") == 0) {
-                config.backend = CV_NETWORK_POLL;
-            } else if (strcmp(value, "epoll") == 0) {
-                config.backend = CV_NETWORK_EPOLL;
-            } else {
-                fputs("Invalid network backend. See --help.\n", stderr);
-
-                return EXIT_FAILURE;
-            }
-        } else {
-            /* Numeric options: pick the upper bound, then validate the value. */
-            unsigned long maximum = INT_MAX;
-
-            if (strcmp(option, "--port") == 0) {
-                maximum = UINT16_MAX;
-            } else if (strcmp(option, "--max-clients") == 0) {
-                maximum = (unsigned long)CV_HARD_MAX_CLIENTS;
-            } else if (strcmp(option, "--idle-timeout-ms") != 0 &&
-                       strcmp(option, "--frame-timeout-ms") != 0 &&
-                       strcmp(option, "--snapshot-interval-ms") != 0 &&
-                       strcmp(option, "--shutdown-timeout-ms") != 0) {
-                fputs("Unknown option. See --help.\n", stderr);
-
-                return EXIT_FAILURE;
-            }
-
-            unsigned long number = 0;
-
-            if (!parse_number(value, maximum, &number) ||
-                (number == 0 && strcmp(option, "--port") != 0)) {
-                fputs("Invalid numeric option. See --help.\n", stderr);
-
-                return EXIT_FAILURE;
-            }
-
-            if (strcmp(option, "--port") == 0) {
-                config.port = (uint16_t)number;
-            } else if (strcmp(option, "--max-clients") == 0) {
-                config.max_clients = (size_t)number;
-            } else if (strcmp(option, "--idle-timeout-ms") == 0) {
-                config.idle_timeout_ms = (uint32_t)number;
-            } else if (strcmp(option, "--frame-timeout-ms") == 0) {
-                config.frame_timeout_ms = (uint32_t)number;
-            } else if (strcmp(option, "--snapshot-interval-ms") == 0) {
-                snapshot_interval = (uint32_t)number;
-                interval_given = true;
-            } else {
-                config.shutdown_timeout_ms = (uint32_t)number;
-            }
-        }
+    if (options->dump_audit) {
+        return dump_audit(options->dump_audit, options->audit_key_file);
     }
 
-    /* Option groups must be complete: persistence and security each need all parts. */
-    if ((directory == NULL) != (key_path == NULL) || (interval_given && !directory)) {
-        fputs("Persistence requires --data and --key-file together. See --help.\n", stderr);
+    /* Catch interruption while terminal echo is disabled. The normal read
+     * error path restores terminal state and wipes the password buffer. */
+    cv_console_signals previous;
 
+    if (!cv_console_install(&previous, handle_signal)) {
         return EXIT_FAILURE;
     }
 
-    if ((policy_path || audit_path || audit_key) && !(policy_path && audit_path && audit_key)) {
-        fputs("Security requires --security, --audit and --audit-key-file together. See --help.\n",
-              stderr);
+    int result = hash_password();
 
+    cv_console_restore(&previous);
+
+    return result;
+}
+
+/** @brief Recover state, serve until a signal arrives, shut down in order. */
+static int run_server(const cli_options *options) {
+    cv_server_config config = cv_server_config_default();
+    uint32_t snapshot_interval = 60000;
+
+    if (!build_config(options, &config, &snapshot_interval)) {
         return EXIT_FAILURE;
     }
 
@@ -423,15 +623,15 @@ int main(int argc, char **argv) {
     cv_persist *store = NULL;
     cv_status status = CV_OK;
 
-    if (directory) {
+    if (options->data) {
         unsigned char key[CV_PERSIST_KEY_BYTES];
 
-        status = cv_persist_key_load(key_path, key);
+        status = cv_persist_key_load(options->key_file, key);
 
-        cv_persist_options options = {directory, key, sizeof(key), NULL, NULL};
+        cv_persist_options persist_options = {options->data, key, sizeof(key), NULL, NULL};
 
         if (status == CV_OK) {
-            status = cv_persist_open(&options, &store);
+            status = cv_persist_open(&persist_options, &store);
         }
 
         cv_crypto_wipe(key, sizeof(key));
@@ -445,9 +645,13 @@ int main(int argc, char **argv) {
 
     cv_security *security = NULL;
 
-    if (policy_path) {
-        status = cv_security_open(
-            policy_path, audit_path, audit_key, store, config.max_clients, &security);
+    if (options->security) {
+        status = cv_security_open(options->security,
+                                  options->audit,
+                                  options->audit_key_file,
+                                  store,
+                                  config.max_clients,
+                                  &security);
     }
 
     /* Callback context outlives the transport. Destroy sockets first so every
@@ -552,4 +756,15 @@ int main(int argc, char **argv) {
     }
 
     return status == CV_OK ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+int main(int argc, char **argv) {
+    cli_options options = {0};
+    bool maintenance = false;
+
+    if (!parse_arguments(argc, argv, &options) || !check_combinations(&options, &maintenance)) {
+        return EXIT_FAILURE;
+    }
+
+    return maintenance ? run_maintenance(&options) : run_server(&options);
 }

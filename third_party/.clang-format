@@ -1,0 +1,3 @@
+# Vendored code is kept byte-for-byte identical to upstream.
+DisableFormat: true
+SortIncludes: Never

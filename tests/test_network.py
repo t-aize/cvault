@@ -371,6 +371,38 @@ class NetworkTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
 
+    def test_cli_help_version_and_option_combinations(self):
+        """--help and --version succeed; maintenance commands refuse to mix with other options."""
+        result = subprocess.run([ARGS.server, "--help"], capture_output=True, timeout=5)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"Usage: cvault-server", result.stdout)
+        self.assertIn(b"--dump-audit", result.stdout)
+        self.assertIn(b"TCP transport", result.stdout)
+
+        result = subprocess.run([ARGS.server, "--version"], capture_output=True, timeout=5)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.startswith(b"cvault-server "))
+
+        for arguments in (["--version", "--port", "0"], ["--version", "--hash-password"],
+                          ["--generate-key", "unused.key", "--port", "0"], ["--no-version"],
+                          ["--dump-audit", "unused.bin"], ["stray"]):
+            result = subprocess.run([ARGS.server, *arguments], capture_output=True, timeout=5)
+
+            self.assertEqual(result.returncode, 1, arguments)
+            self.assertNotIn(b"Listening", result.stdout)
+
+    def test_cli_accepts_equals_syntax(self):
+        """Options may be written as --name=value as well as --name value."""
+        real = Server(fixture=False, extra=("--max-clients=2", "--idle-timeout-ms=5000"))
+        self.addCleanup(real.close)
+
+        with real.connect() as client:
+            client.sendall(b"PING\nQUIT\n")
+
+            self.assertEqual(read_to_close(client), b"+PONG\n+OK\n")
+
     def test_ipv6_loopback(self):
         """The server can bind to and serve the IPv6 loopback address."""
         try:

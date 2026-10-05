@@ -39,8 +39,14 @@ so IPv4 requires a separate server instance. Bind failure exits with status 1.
 | `--frame-timeout-ms` | `5000` | 1..INT_MAX |
 | `--shutdown-timeout-ms` | `2000` | 1..INT_MAX |
 
-Numeric arguments reject signs, whitespace, overflow and trailing characters.
-`--help` and `--version` exit successfully without opening sockets. The executable
+Options are parsed by the vendored [argparse](../third_party/README.md) library, so
+both `--port 6380` and `--port=6380` work, `--help` prints the generated usage
+text, and an unknown option or a missing value exits with status 1. Numeric
+arguments are validated by cvault itself: they reject signs, whitespace, hexadecimal
+or octal forms, overflow and trailing characters. Positional arguments are never
+accepted. `--help` and `--version` exit successfully without opening sockets, and
+maintenance commands (`--version`, `--hash-password`, `--generate-key`,
+`--dump-audit`) cannot be combined with other options. The executable
 also accepts `--data`, `--key-file`, `--generate-key` and `--snapshot-interval-ms`;
 see [persistence](persistence.md). Recovery completes before bind/listen, and
 a corrupt database prevents readiness. Security policy/audit recovery also completes
