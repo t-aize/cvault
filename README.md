@@ -138,9 +138,9 @@ CLI storage commands remain planned.
 | Persistence | Encrypted append-only log replayed at startup | ✅ |
 | Persistence | Atomic snapshots (POSIX `fork`, Windows immutable-copy worker) | ✅ |
 | Security | Encryption at rest (XChaCha20-Poly1305 journal/snapshots) | ✅ |
-| Security | `AUTH` with Argon2id password verification | 🚧 |
-| Security | Per-prefix read/write access control | 🚧 |
-| Security | Audit log of sensitive operations | 🚧 |
+| Security | `AUTH` with Argon2id password verification | ✅ |
+| Security | Per-prefix read/write access control | ✅ |
+| Security | Audit log of sensitive operations | ✅ |
 | Robustness | Full parser validation, sustained fuzzing and sanitizer runs | 🚧 |
 | Data protection | Compaction, automatic expiry and per-user export | 🚧 |
 
@@ -149,7 +149,10 @@ CLI storage commands remain planned.
 See the [in-memory core guide](docs/core.md) for API contracts, expiration rules,
 memory ownership, examples, complexity and test coverage. The five operations
 are implemented in the storage API and authenticated text command layer.
-The [code guide](docs/code-guide.md) explains module boundaries, ownership and style. The [TCP transport](docs/network.md) handles connections and frames;
+The [code guide](docs/code-guide.md) explains module boundaries, ownership and the
+code and documentation style. Every public header carries Doxygen comments
+(`@brief`, `@param`, `@return`), so `include/cvault/*.h` is the API reference.
+The [TCP transport](docs/network.md) handles connections and frames;
 [encrypted persistence](docs/persistence.md) owns durable state and startup recovery.
 
 ```text

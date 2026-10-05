@@ -29,16 +29,24 @@ or test-only commands.
 ## Readability conventions
 
 All project text is English. `.clang-format` defines four-space indentation,
-100-column lines, explicit control-flow braces, expanded short functions/loops and
-blank lines between definitions. Keep one statement per line and give variables
-names that explain their role. Prefer small helpers for independent concerns:
-reading policy bytes and parsing a policy record, for example, have separate
-functions. Group a function into validation, preparation, execution and cleanup
-with blank lines; comments should explain the invariant or reason for an ordering.
-Do not repeat the code in prose or add banners around every trivial helper.
+100-column lines, explicit control-flow braces, indented `case` labels, expanded
+short functions/loops and blank lines between definitions. Keep one statement per
+line and give variables names that explain their role. Prefer small helpers for
+independent concerns: reading policy bytes and parsing a policy record, for
+example, have separate functions. Separate the steps of a function (validation,
+preparation, execution, cleanup) with a blank line, including before a final
+`return` that follows other statements; comments should explain the invariant or
+the reason for an ordering. Do not repeat the code in prose, and do not use banner or separator
+comments (rows of dashes or asterisks): blank lines and headings in doc comments
+provide the structure.
 
-Document public entry points with input bounds, ownership/lifetime, output reset
-behavior, errors, thread constraints and any non-obvious side effects. Local
+Every file starts with a Doxygen `@file` / `@brief` block that states its purpose
+and the design decisions a reader needs. Every public function and type is
+documented in its header with `@brief`, `@param` and `@return`, covering input
+bounds, ownership and lifetime, output reset behaviour, the possible `cv_status`
+codes, thread constraints and non-obvious side effects. Internal (`static`)
+functions and types get a short `@brief` and, where it matters, the reason for
+their behaviour. Struct fields use trailing `/**< ... */` comments. Local
 comments explain details such as why Windows headers require a particular order,
 why a deadline uses a monotonic clock, or why an intent must be synchronized before
 a mutation. Keep error paths explicit and short. Do not compress independent
@@ -60,8 +68,10 @@ find src include client tests -type f \( -name '*.c' -o -name '*.h' \) \
   -exec clang-format -i --style=file {} +
 ```
 
-Configure CLion to respect the repository's `.clang-format`. Keep order-dependent
-platform includes separated with a comment so sorting cannot move SDDL before
+Configure CLion to respect the repository's `.clang-format`. Includes are grouped
+by hand with blank lines (project headers, then system and third-party headers);
+clang-format only sorts inside a group. Keep order-dependent platform includes
+separated by a blank line and a comment so sorting cannot move SDDL before
 Windows types or legacy Winsock before Winsock2. Formatting is optional tooling,
 not a dependency of normal builds.
 
