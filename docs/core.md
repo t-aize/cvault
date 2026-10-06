@@ -65,8 +65,8 @@ physical entry. Expired entries cannot be revived by `EXPIRE`.
 `GET` and `TTL` are read-only and hide expired entries without freeing them.
 `DEL` and `EXPIRE` reclaim expired entries they encounter, while still reporting
 `CV_ERR_NOT_FOUND`. `cv_hashtable_purge_expired` sweeps the whole table using one
-clock reading and returns the number removed. Call it periodically from the
-future event loop to reclaim untouched expired values; the table creates no
+clock reading and returns the number removed. The server calls it on a timer
+(`--expiry-sweep-ms`) to reclaim untouched expired values; the table creates no
 background thread. Clock failure leaves a sweep unchanged.
 
 `cv_hashtable_get_stats` reports physical entries, bucket count and longest chain.

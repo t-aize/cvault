@@ -288,8 +288,11 @@ four Windows combinations (GCC/MSVC x Debug/Release) and six macOS combinations
 (Apple Clang/LLVM x Debug/Release/ASan) on `macos-26` Apple Silicon. Windows uses the
 `windows-2025-vs2026` runner. Checkout and Python setup actions use current explicit
 tags; the setup selects the latest stable Python 3.x. Compilers and actual tool
-versions are printed or verified during setup. Creating the workflow does not
-execute its remote jobs.
+versions are printed or verified during setup. A separate `fuzz` job runs only on the
+weekly schedule (Mondays, 03:17 UTC) and on demand (`workflow_dispatch`): it builds
+the `asan` preset and runs the fuzzing campaign for two million iterations per
+target, with a seed derived from the run number that is printed on failure. Creating
+the workflow does not execute its remote jobs.
 
 ## Code readability and API documentation
 

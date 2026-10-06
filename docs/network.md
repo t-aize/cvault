@@ -72,8 +72,8 @@ or octal forms, overflow and trailing characters. Positional arguments are never
 accepted. `--help` and `--version` exit successfully without opening sockets, and
 maintenance commands (`--version`, `--hash-password`, `--generate-key`,
 `--dump-audit`) cannot be combined with other options. The executable
-also accepts `--data`, `--key-file`, `--generate-key` and `--snapshot-interval-ms`;
-see [persistence](persistence.md). Recovery completes before bind/listen, and
+also accepts `--data`, `--key-file`, `--generate-key`, `--snapshot-interval-ms`,
+`--compact` and `--expiry-sweep-ms`; see [persistence](persistence.md). Recovery completes before bind/listen, and
 a corrupt database prevents readiness. Security policy/audit recovery also completes
 before binding. The probe handler still never accesses storage; `--security` selects
 the authenticated application handler and its documented protocol.
@@ -116,8 +116,8 @@ epoll tokens include the ID and slot, and stale events are ignored. New clients
 are accepted after processing a ready batch so reused slots cannot consume old
 events. Write interest is enabled only while a response remains queued.
 
-Each active client owns one 65,824-byte input buffer and one 65,664-byte response
-buffer, allocated together (131,488 bytes). A maximum of one response is queued
+Each active client owns one 65,824-byte input buffer and one 66,560-byte response
+buffer, allocated together (132,384 bytes). A maximum of one response is queued
 per client. The server pauses reads until that response drains, retaining any
 already buffered pipeline bytes. This applies backpressure instead of growing
 an unbounded output queue. Sent response bytes, consumed input bytes and all client
@@ -219,10 +219,11 @@ configured release toolchain. CI continues to require stable GCC 16.2.0 or Clang
 The server remains a learning project, with a hard cap of 1,024 clients, fixed
 buffers and a single owner thread. Slot scanning makes each iteration O(max_clients)
 even with epoll; this is not an unbounded high-scale server. There is no TLS,
-DNS binding, Unix socket backend or interactive CLI yet. The configured security
-layer supplies AUTH, prefix-controlled storage and an authentication rate gate.
-Keep loopback binding or use an authenticated encrypted tunnel. The in-memory table's periodic expiration sweep
-belongs in that future integration; the transport currently owns no table.
+DNS binding, Unix socket backend or interactive CLI, and none is planned. The
+configured security layer supplies AUTH, prefix-controlled storage and an
+authentication rate gate. Keep loopback binding or use an authenticated encrypted
+tunnel. The expiry sweep and snapshot scheduling run in the server's main loop,
+not in the transport, which owns no table.
 
 Reference semantics: [epoll](https://man7.org/linux/man-pages/man7/epoll.7.html),
 [poll](https://man7.org/linux/man-pages/man2/poll.2.html),

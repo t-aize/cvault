@@ -12,11 +12,11 @@ and [security](security.md) describe runtime behavior and deployment.
 | `main.c` | Option parsing (argparse) and validation, provisioning commands, startup, event loop, snapshot scheduling and shutdown |
 | `server.c` | Socket ownership, bounded framing, backpressure, poll/epoll readiness and deadlines |
 | `parser.c` | Allocation-free grammar, bounded borrowed slices and signed integer validation |
-| `security_service.c` | Per-connection sessions, AUTH throttling, ACL-before-storage dispatch and fail-closed audit ordering |
+| `security_service.c` | Per-connection sessions, AUTH throttling, ACL-before-storage dispatch (including per-entry filtering for EXPORT and PURGE) and fail-closed audit ordering |
 | `auth.c` | Immutable credential policy, bounded PHC profiles and independent prefix grants |
 | `audit.c` | Private encrypted event stream, schema validation, synchronization and verified JSON export |
 | `hashtable.c` | Owned key/value memory, keyed hashing, collision chains, resizing and expiration |
-| `persist.c` | Durable mutations, recovery, wall/monotonic deadline conversion and snapshot lifecycle |
+| `persist.c` | Durable mutations, recovery, wall/monotonic deadline conversion, snapshot lifecycle, journal compaction and the expiry sweep |
 | `persist_codec.c` | Versioned byte layout, little-endian encoding, AEAD and authenticated chaining |
 | `persist_io.c` | Private files/locks, platform permissions, synchronization and atomic publication |
 | `crypto.c`, `common.c`, `config.c` | Shared crypto initialization/wiping, status strings and defaults |
@@ -159,6 +159,17 @@ just success cases. `CHECK` remains enabled in Release. Integration tests use re
 processes, files and TCP sockets; private compiled redirects inject allocation or
 synchronization failures without changing production interfaces. Linux/macOS
 sanitizer builds also exercise snapshot ownership and resource cleanup.
+
+Parser changes must keep `tests/parser_reference.c` (an independent implementation of
+the grammar) and the explicit table in `tests/test_parser.c` in step: the two
+implementations have to agree on every input. `tests/fuzz/fuzz_campaign.c` is the
+oracle-based fuzzing campaign (parser versus reference, record codec prefix property,
+policy loader, whole service against a model); extend its model when a command or a
+reply format changes, and run it longer than the CTest default after touching the
+parser, the codec or the dispatch code, for example
+`cvault-fuzz-campaign --iterations 1000000` in the `asan` preset (see
+[fuzzing](fuzzing.md)). Sanitizer builds abort on undefined behaviour, so a finding
+fails the test instead of only printing a diagnostic.
 
 Formatting-only edits should preserve behavior; check the resulting diff for
 include ordering and preprocessor/macro-sensitive code before compiling. Do not

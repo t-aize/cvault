@@ -3,12 +3,22 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Current status: core, TCP transport, encrypted persistence and security implemented.**
-> The server supports authenticated SET, GET, DEL, EXPIRE and TTL, literal prefix
-> read/write permissions and a durable encrypted audit trail. Journal recovery and
-> background snapshots use POSIX fork or a Windows immutable-copy worker.
-> Configure security explicitly; the default handler exposes only PING/QUIT.
-> The interactive CLI remains unfinished. Code, documentation, tests and CI are English.
+> **Learning project: finished, and no further updates are planned.**
+> cvault was written to learn low-level C, networking, applied cryptography and
+> secure design. It is **not production software**, it has never been audited, and it
+> makes no security or compliance claim. The repository is kept as a complete,
+> documented snapshot for study: **there will be no new features, bug fixes,
+> dependency updates or support**, and issues or pull requests may go unanswered.
+> You are welcome to read it, learn from it and fork it (MIT license).
+>
+> What it does: an authenticated, encrypted key-value server over TCP with SET, GET,
+> DEL, EXPIRE, TTL, prefix-scoped EXPORT and PURGE, literal prefix read/write
+> permissions, Argon2id logins, a tamper-evident audit log, an encrypted journal and
+> snapshots with optional compaction, and an automatic expiry sweep. Journal
+> recovery and background snapshots use POSIX fork or a Windows immutable-copy
+> worker. The interactive CLI client is only a scaffold. Configure security
+> explicitly; the default handler exposes only PING/QUIT. Code, documentation, tests
+> and CI are in English.
 
 ## Why this project?
 
@@ -143,8 +153,8 @@ permissions, examples and audit export. Without security configuration, storage
 commands remain rejected.
 See the [TCP transport guide](docs/network.md) for options, embedding and tests.
 See [encrypted persistence](docs/persistence.md) for `--data`, key provisioning,
-startup replay, durability, snapshot backends and the durable C API. Interactive
-CLI storage commands remain planned.
+startup replay, durability, snapshot backends, compaction and the durable C API.
+The interactive CLI client is a scaffold only.
 
 ## Features
 
@@ -162,8 +172,10 @@ CLI storage commands remain planned.
 | Security | `AUTH` with Argon2id password verification | ✅ |
 | Security | Per-prefix read/write access control | ✅ |
 | Security | Audit log of sensitive operations | ✅ |
-| Robustness | Full parser validation, sustained fuzzing and sanitizer runs | 🚧 |
-| Data protection | Compaction, automatic expiry and per-user export | 🚧 |
+| Robustness | Full parser validation (independent reference), fuzzing campaign, sanitizer runs | ✅ |
+| Data protection | Journal compaction (`--compact`) | ✅ |
+| Data protection | Automatic expiry sweep (`--expiry-sweep-ms`) | ✅ |
+| Data protection | Per-prefix `EXPORT` (paginated) and `PURGE` | ✅ |
 
 ## Architecture
 
@@ -202,14 +214,14 @@ cvault/
 │   ├── parser.c / hashtable.c / crypto.c / auth.c
 │   └── persist.c / persist_codec.c / persist_io.c / audit.c / security_service.c
 ├── client/main.c     # CLI entry point
-├── tests/            # Core, network, persistence, security and dependency tests + fuzz harness
+├── tests/            # Core, parser (reference oracle), network, persistence, security tests + fuzzing
 ├── scripts/          # Local Windows/CLion, Linux and macOS setup
 ├── docs/             # Core, network, persistence, development and security guides
 └── .github/workflows/ci.yml
 ```
 
-Interfaces are starting points and can evolve as each module is implemented.
-`CV_ERR_NOT_IMPLEMENTED` distinguishes unfinished operations from success.
+`CV_ERR_NOT_IMPLEMENTED` is returned for unknown commands and for an option that the
+platform cannot provide (for example the epoll backend outside Linux).
 
 ## Protocol
 
@@ -223,51 +235,72 @@ GET <key>
 DEL <key>
 EXPIRE <key> <signed-seconds>
 TTL <key>
+EXPORT <prefix> [<after>]
+PURGE <prefix>
 QUIT
 ```
 
 AUTH is required before storage access. Prefix grants independently authorize
-reads (GET/TTL) and writes (SET/DEL/EXPIRE). Replies use `+` for success, `-` for
-errors, `:<seconds>` for TTL and `$<length>\n<bytes>\n` for GET. The text protocol
-preserves spaces in passwords/values but cannot carry NUL/CR/LF in them; the C
-storage API remains binary-safe. EXPORT/PURGE remain reserved. See the complete
-[protocol and security contract](docs/security.md) for bounds and failure semantics.
+reads (GET/TTL/EXPORT) and writes (SET/DEL/EXPIRE/PURGE). Replies use `+` for success,
+`-` for errors, `:<seconds>` for TTL and `$<length>\n<bytes>\n` for GET. The text
+protocol preserves spaces in passwords/values but cannot carry NUL/CR/LF in them; the
+C storage API remains binary-safe.
 
-## Security design and remaining work
+`EXPORT` returns, one page at a time, the live entries under a prefix that the
+session is allowed to read (with their TTL), sorted by key; `+MORE <key>` tells the
+client where the next page starts. `PURGE` erases the entries under a prefix that the
+session is allowed to write, at most 100 per call, and answers `:<count>`. See the
+complete [protocol and security contract](docs/security.md) for bounds and failure
+semantics.
+
+## Security design and limitations
 
 The intended design protects against disk inspection, unauthenticated clients,
 malformed input and password-comparison timing attacks. It does not protect
 against process-memory inspection, a compromised host or network eavesdropping
-(TLS is not planned for the first version). Bind to localhost by default.
+(TLS is not implemented and will not be). Bind to localhost by default.
 
 All cryptographic primitives come from [libsodium](https://doc.libsodium.org/).
 Its [official Windows installation guide](https://doc.libsodium.org/installation)
 documents the prebuilt MinGW libraries used by the bootstrap script.
 The journal, snapshots and audit stream use authenticated encryption. Argon2id
-authentication and prefix ACLs are implemented; key rotation and TLS remain unfinished. See [persistence guarantees and limits](docs/persistence.md).
-See [security notes](docs/security.md) for provisioning, guarantees and remaining limits.
+authentication and prefix ACLs are implemented; key rotation and TLS are not. See
+[persistence guarantees and limits](docs/persistence.md). See
+[security notes](docs/security.md) for provisioning, guarantees and limits.
 
-## Data protection goals
+## Data protection
 
-| Principle | Planned mechanism |
+| Principle | Mechanism |
 |---|---|
-| Storage limitation | Automatic key expiry |
-| Erasure | `PURGE` plus append-only log compaction |
-| Access / portability | `EXPORT` by authorized prefix |
-| Accountability | Sensitive-operation audit trail |
-| Minimization | Bounded inputs, no unnecessary metadata |
+| Storage limitation | `EXPIRE`, plus a periodic sweep (`--expiry-sweep-ms`) that wipes expired values from memory |
+| Erasure | `PURGE` by prefix, then a snapshot and journal compaction (`--compact`) drop the old encrypted records |
+| Access / portability | `EXPORT` by authorized prefix, paginated, with TTLs |
+| Accountability | Tamper-evident audit trail, including EXPORT and PURGE |
+| Minimization | Bounded inputs, no unnecessary metadata, no keys or values in the audit log |
 
 Compaction alone cannot promise physical erasure from SSDs, backups or snapshots.
-These are educational design goals, not a claim of GDPR compliance.
+These are educational mechanisms, not a claim of GDPR compliance.
 
-## Testing and roadmap
+## Testing and known limitations
 
 Current tests cover the hash table's binary values, ownership, input bounds,
 collisions, resizing, expiration, clock failures and allocation rollback. A private
 test build forces collisions and checks that key/value allocations are wiped before
 freeing. Other tests check module linkage, safe scaffold behavior, parser input bounds,
 libsodium initialization, an XChaCha20-Poly1305 dependency roundtrip and tamper rejection.
-Checks remain enabled in Release builds. They do not validate unimplemented features.
+Checks remain enabled in Release builds.
+
+The parser is validated against an independent reference implementation of the
+grammar: an explicit table of cases, every size boundary, exhaustive single-byte
+mutations of each valid line and a 400,000-line random sweep must give identical
+results. A deterministic fuzzing campaign (`cvault-fuzz-campaign`) attacks the
+parser, the encrypted record codec (only exact prefixes of what was written may be
+accepted), the policy loader and the complete security service, whose replies are
+checked against a model and whose audit log must authenticate afterwards. A short run
+is part of the suite; a weekly CI job runs millions of iterations under
+AddressSanitizer and UBSan, which abort on undefined behaviour. Bugs injected on
+purpose into the parser, the codec, the ACL check and EXPIRE are all detected. See
+[fuzzing](docs/fuzzing.md) for the method and the results.
 
 Network tests exercise real TCP sockets: concurrency, frame fragmentation/pipelining,
 partial writes, slow-reader isolation, half-closes, resets, connection limits,
@@ -289,13 +322,16 @@ The parser harness can be built now; see [fuzzing instructions](docs/fuzzing.md)
 Security tests cover real AUTH/ACL dispatch, reauthentication revocation, session
 isolation, strict grammar, persistence restart and authenticated audit export.
 Private synchronization faults prove that failed audit intents prevent mutations
-and failed audit results stop further work.
+and failed audit results stop further work. Compaction, the expiry sweep, EXPORT and
+PURGE have their own unit, crash-window, fault-injection and end-to-end tests.
 
-1. Interactive CLI integration and expired-entry sweeps.
-2. Journal compaction, storage quotas and benchmarks.
-3. Key rotation, online policy reload and recovery tooling.
-4. Audit retention/rotation, remote sequence anchoring, export and purge.
-5. Sustained fuzzing campaigns, Valgrind and power-loss testing.
+Not implemented, and not planned (the project is finished):
+
+1. An interactive CLI client (only a scaffold exists).
+2. TLS, key rotation and online policy reload.
+3. Audit retention, rotation and remote sequence anchoring.
+4. Storage quotas, benchmarks, Valgrind runs and power-loss testing.
+5. Multi-day AFL++ campaigns on dedicated hardware.
 
 ## Third-party code
 

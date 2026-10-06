@@ -58,6 +58,7 @@ Files in the data directory:
 | `snapshot.cvs` | Complete authenticated checkpoint at a journal sequence |
 | `writer.lock` | Exclusive writer lock, held until close |
 | `.snapshot-<random>.tmp` | Temporary checkpoint; orphaned crash files are ignored |
+| `.journal-<random>.tmp` | Replacement journal during compaction; orphaned files are ignored |
 
 Use a trusted private local directory whose parent already exists. POSIX creates
 directories with mode 0700 and files with mode 0600; existing directories must be
@@ -106,8 +107,9 @@ It appends an authenticated record, flushes stdio and synchronizes the file, the
 swaps the owned table pointer. Allocation, argument or overflow errors preserve
 both the journal and published memory. Mutations cost O(live entries + live bytes)
 and temporarily hold two tables. This deliberate correctness-first implementation
-is intended for small stores; it has no write batching, total-memory quota, file-size
-quota or automatic log compaction. Monitor available storage and size externally.
+is intended for small stores; it has no write batching, total-memory quota or
+file-size quota, and compaction is opt-in (see below). Monitor available storage and
+size externally.
 
 An append/flush/synchronization failure makes the handle unusable for data access
 and further writes; stats/close still work. **Close and reopen to reconcile state.**
@@ -117,6 +119,58 @@ previous checkpoint intact and do not poison the journal handle. A rename follow
 by directory-sync failure is an uncertain publication: a complete new checkpoint
 may already be visible. Filesystem/device guarantees still apply; tests cannot
 simulate every power-loss or hardware failure.
+
+## Compaction and expiry sweep
+
+A snapshot makes the older journal records redundant but does not remove them: left
+alone, the journal only grows and startup authenticates all of it. **Compaction**
+rewrites the journal with just the records that follow the newest snapshot.
+
+```c
+cv_persist_snapshot(store);   /* or wait for a background snapshot */
+cv_persist_compact(store);    /* the journal now holds only the later records */
+```
+
+The server does this for you with `--compact`: after every background snapshot, and
+once more at graceful shutdown, it drops the journal records that the snapshot
+covers. `cv_persist_get_stats` reports the result as `journal_baseline`, the sequence
+before the first record still in the journal.
+
+How it works. The replacement journal keeps the dataset identity and records the
+snapshot sequence as its baseline; the records after the snapshot are read from the
+old journal and written again, in order, with fresh nonces. The new file is
+synchronised, the old journal is closed (Windows cannot rename over an open file),
+the new file is renamed over it atomically, the directory is synchronised and the
+store reattaches to the new journal. Cost is proportional to the records kept.
+
+Crash safety. A crash at any point leaves one of these states, and recovery handles
+each of them:
+
+| State found after a crash | Result |
+|---|---|
+| Old journal and the newest snapshot (before the rename) | Recovers; the compaction simply did not happen |
+| New journal and the newest snapshot (after the rename) | Recovers to the same state |
+| New journal with an older snapshot, or with no snapshot | Refused as corrupt: its baseline is newer than the snapshot, so history is missing |
+| Orphaned `.journal-<random>.tmp` | Ignored |
+
+Failures before the rename (write or synchronisation errors, a short write, no space)
+leave the old journal and the data untouched and the handle usable; a failure after
+the point of no return poisons the handle, which then has to be reopened.
+Compaction is refused with `CV_ERR_BUSY` while a background snapshot is outstanding,
+and does nothing when the newest snapshot is not newer than the journal baseline.
+
+What it does not do. After compaction the previous encrypted versions of the values
+are gone from the live files, which is what an erasure request needs, but it cannot
+promise physical erasure: SSD wear levelling, file system journals, snapshots of
+the volume and backups may keep copies. Keep the snapshot file as well: it is the
+only complete copy of the state up to its sequence.
+
+**Expiry sweep.** Expired entries are invisible at once but stay in memory until
+something touches them. `cv_persist_purge_expired` wipes and frees them in
+O(buckets + entries); the server calls it every `--expiry-sweep-ms` (default 1000).
+Nothing is journaled, because expiry is derived from the persisted deadlines and
+recovery drops expired entries by itself. Later snapshots no longer contain the swept
+entries.
 
 ## Replay and expiration
 
@@ -219,15 +273,19 @@ this is not an anti-rollback system.
 
 ## Verification
 
-`persistence` runs 26 black-box scenarios using Python's standard library, real
+`persistence` runs 32 black-box scenarios using Python's standard library, real
 files and separate processes. Coverage includes binary/empty/maximal inputs, expiry
 across downtime, historical TTL extension, full tail-byte truncation coverage,
 header/tag corruption, record duplication/reordering, snapshot completeness,
 standalone restore, dataset mismatch, wrong keys, single-writer locks, abrupt exit,
 background checkpoint boundaries, concurrent journal mutations, close/join,
 key-file policies, POSIX permissions/symlinks/hardlinks, and server recovery before
-bind with periodic checkpoints. One POSIX-only permission scenario is skipped on
-Windows. Private test builds inject clone, partial-write and post-sync failures;
+bind with periodic checkpoints. Compaction is covered by state preservation across
+cycles, byte-identical no-ops, every crash window (old journal with new snapshot, new
+journal with new snapshot, new journal with an older or missing snapshot), refusal
+while a snapshot runs and injected failures before the swap; the expiry sweep by
+exact counts of removed and remaining entries. One POSIX-only permission scenario is
+skipped on Windows. Private test builds inject clone, partial-write and post-sync failures;
 these redirects are absent from production. Core helper tests cover exact cloned
 deadlines, visitors, expired entries, clock errors and allocation cleanup/wiping.
 Native `persistence_codec` tests also verify binary roundtrips and rejection of

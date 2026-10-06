@@ -130,7 +130,10 @@ remove a broader grant; there are no deny rules or implicit administrator role.
 Every storage command checks authorization before looking up or mutating its key.
 Forbidden existing and missing keys produce the same access-denied response.
 TTL is read-sensitive; changing expiration or deleting is write-sensitive.
-EXPORT and PURGE remain reserved and cannot bypass this layer.
+EXPORT and PURGE name a prefix instead of a key, so they require a login and then
+apply the same grants to every entry they touch: EXPORT only returns entries the
+session may read, PURGE only erases entries it may write (see
+[Export, erasure and expiry](#export-erasure-and-expiry)).
 
 Policies are immutable for the server lifetime. Stop, edit hashes/grants, then
 restart to rotate credentials or permissions. Restart revokes all sessions. Audit
@@ -152,6 +155,8 @@ GET <key>
 DEL <key>
 EXPIRE <key> <signed-seconds>
 TTL <key>
+EXPORT <prefix> [<after>]
+PURGE <prefix>
 QUIT
 ```
 
@@ -170,9 +175,11 @@ Overflow is rejected, preserving the existing value and TTL.
 | `$<length>\n<bytes>\n` | GET value; length excludes framing |
 | `$-1\n` | Authorized GET/DEL/EXPIRE on a missing key |
 | `:<seconds>\n` | TTL; `-1` persistent, `-2` missing, otherwise whole seconds |
+| `*<n>\n` ... | One EXPORT page, see below |
+| `:<count>\n` | PURGE; number of keys erased by this call (at most 100) |
 | `-ERR authentication failed\n` | Failed, malformed or rate-limited AUTH |
 | `-ERR access denied\n` | Unauthenticated or unauthorized storage operation |
-| `-ERR invalid command\n` | Grammar error or unsupported/reserved command |
+| `-ERR invalid command\n` | Grammar error or unknown command |
 | `-ERR operation failed\n` | Other nonfatal storage error |
 
 Each accepted connection has independent session state keyed by a unique transport
@@ -191,10 +198,67 @@ on the single owner thread and can briefly delay all clients. Only one 64 MiB
 verification executes at a time. There is no authentication worker thread, keeping
 POSIX fork snapshots compatible with the single-threaded process requirement.
 
+## Export, erasure and expiry
+
+These commands give the data protection features of the project a protocol. They
+never see more than the session's grants allow.
+
+**EXPORT `<prefix>` [`<after>`]** returns the live entries whose key starts with the
+literal `<prefix>` and which the session may read, sorted by key. Expired entries are
+skipped, keys that cannot be written in the text protocol are skipped, and a session
+without read grants gets an empty page, not an error. One reply is one page:
+
+```text
+*<entries in this page>\n
+=<key> <ttl> <length>\n<length value bytes>\n       once per entry
++MORE <last key of the page>\n      or      +DONE\n
+```
+
+`<ttl>` is the remaining whole seconds, or `-1` without expiry. Values are length
+framed, so they are binary safe. A page holds as many entries as fit one reply
+(`CV_MAX_RESPONSE_BYTES`, about 65 KiB, always enough for one maximum-size entry).
+After `+MORE <key>` the client repeats the command with that key as `<after>`; only
+keys strictly greater than it are returned, so no entry is repeated or skipped by
+the paging itself. Entries changed between two pages are of course seen as they
+are at the time of each call. Each call scans the table (O(entries)) and sorts the
+matches.
+
+```text
+> AUTH alice s3cret
+< +OK
+> SET alice:b hello world
+< +OK
+> SET alice:a 1
+< +OK
+> EXPORT alice:
+< *2
+< =alice:a -1 1
+< 1
+< =alice:b -1 11
+< hello world
+< +DONE
+```
+
+**PURGE `<prefix>`** erases the live entries under the prefix that the session may
+write and answers `:<count>`. At most 100 keys are erased per call, so a long
+operation stays short for every other client: repeat until the answer is below 100.
+Each deletion is journaled like a DEL (it survives a crash, and on a durable store
+each one copies the table, which is why the batch is small), and the command as a
+whole is audited. Run a snapshot and a
+compaction (`--compact`) afterwards so that the old encrypted records disappear
+from the files; the limits of physical erasure are described in
+[persistence](persistence.md#compaction-and-expiry-sweep).
+
+**Expiry.** A value is unreadable at its deadline. To also remove it from memory
+the server wipes expired entries on a timer, `--expiry-sweep-ms` (default 1000).
+The sweep is not an audited operation: it only removes data that was already
+unreadable, and it writes nothing to the journal.
+
 ## Audit guarantees and reading events
 
 The audit stream records START/STOP, authentication attempts/results, authorized
-storage intents/results, permission refusals and malformed/unsupported commands.
+storage intents/results (including EXPORT and PURGE), permission refusals and
+malformed/unsupported commands.
 PING/QUIT, transport-level malformed frames and disconnects are not sensitive
 operation events. Failed authentication records use `anonymous`; untrusted candidate
 usernames are never logged. Successful/authenticated operations use the validated
@@ -254,7 +318,8 @@ Preserve damaged files and investigate or restore a verified backup before resta
 A previously failed synchronization can leave a complete event on disk; startup
 accepts it if the full chain authenticates. Forced termination cannot write STOP.
 
-There is no automatic rotation, compaction, remote anchor or retention scheduler.
+There is no automatic rotation, compaction, remote anchor or retention scheduler
+for the audit file (compaction applies to the storage journal only).
 Startup/export scan the complete audit stream in O(file size), with fixed codec
 buffers and no event accumulation. Plan disk capacity and retention. For offline
 rotation, stop the server, archive the audit file together with a secure backup of
@@ -279,18 +344,23 @@ outlive the security service. See [code guide](code-guide.md) for implementation
 reauthentication revocation, session isolation/reuse, independent prefix grants,
 protocol boundaries, expiration, durable restart/background snapshots, malformed
 policies, audit export, wrong keys, record tampering/reordering/torn tails, exclusive
-locks and injected synchronization failures before/after mutations. POSIX additionally
+locks and injected synchronization failures before/after mutations. EXPORT is
+tested for per-grant filtering, ordering, TTLs, binary-safe values, anonymous
+refusal, expired entries and pagination over more than 300 KB including a
+maximum-size value; PURGE for grant filtering, the 100-key batches and durability
+across a restart, with their audit events. POSIX additionally
 checks permissions and symlinks. These tests run in the existing Windows/Linux/macOS
 CTest matrix, including POSIX sanitizer configurations.
 
-## Scope and remaining work
+## Scope and limitations
 
 Encryption at rest does not protect a compromised host or running process memory.
 Passwords and values are plaintext in memory; buffers are wiped on release but are
 not guaranteed to be locked against swapping. The TCP connection has no TLS: keep
 loopback binding or use an authenticated encrypted tunnel. There is no interactive
 storage CLI, online policy reload, automatic account lockout across reconnects,
-remote audit anchoring, audit rotation, storage quota or journal compaction yet.
-Expired values become unreadable at their deadline; physical reclamation on reads
-is not guaranteed. Neither the tests nor this design claim a security certification
-or regulatory compliance. See [persistence limitations](persistence.md).
+remote audit anchoring, audit rotation or storage quota, and none is planned.
+Expired values become unreadable at their deadline and are wiped from memory by the
+periodic sweep (so up to one sweep interval later). Neither the tests nor this
+design claim a security certification or regulatory compliance. See
+[persistence limitations](persistence.md).
