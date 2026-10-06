@@ -24,6 +24,11 @@
  *                      [--corpus DIR] [--scratch DIR]
  */
 
+#ifdef _MSC_VER
+/* The checks parse bounded, trusted reply text with sscanf(). */
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include "cvault/audit.h"
 #include "cvault/auth.h"
 #include "cvault/config.h"

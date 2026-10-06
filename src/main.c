@@ -343,7 +343,7 @@ typedef struct {
  */
 static bool build_settings(const cli_options *options, server_settings *settings) {
     cv_server_config *config = &settings->transport;
-    unsigned long port = config->port, clients = config->max_clients;
+    unsigned long port = config->port, clients = (unsigned long)config->max_clients;
     unsigned long idle = config->idle_timeout_ms, frame = config->frame_timeout_ms;
     unsigned long shutdown = config->shutdown_timeout_ms, interval = settings->snapshot_interval_ms;
     unsigned long sweep = settings->expiry_sweep_ms;
