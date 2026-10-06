@@ -28,8 +28,12 @@
 /** Absolute upper bound a caller may request for the client cap. */
 #define CV_HARD_MAX_CLIENTS ((size_t)1024)
 
-/** Largest reply the server will ever build for one request. */
-#define CV_MAX_RESPONSE_BYTES (CV_MAX_VALUE_BYTES + (size_t)128)
+/**
+ * Largest reply the server will ever build for one request. It leaves room for a
+ * full-size value plus the framing of GET and of an EXPORT page holding one entry
+ * (key, TTL and length fields, page header and continuation line).
+ */
+#define CV_MAX_RESPONSE_BYTES (CV_MAX_VALUE_BYTES + (size_t)1024)
 
 /** Socket readiness mechanism used by the event loop. */
 typedef enum {
@@ -51,7 +55,7 @@ typedef struct {
     /** TCP port; zero requests an OS-selected ephemeral port. */
     uint16_t port;
 
-    /** Reserved for the future persistence layer; unused by the transport. */
+    /** Not used by the transport: persistence is configured separately (cv_persist_open()). */
     const char *data_directory;
 
     /** Active connection cap, between 1 and #CV_HARD_MAX_CLIENTS. */

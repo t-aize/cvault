@@ -7,12 +7,20 @@
  *     security-fixture --api <policy> <audit> <audit-key>
  *         Exercises cv_auth_* and cv_audit_* directly.
  *
+ *     security-fixture --expiry <policy> <audit> <audit-key>
+ *         Checks that the periodic sweep erases expired entries of the volatile
+ *         storage and nothing else.
+ *
  *     security-fixture --fault <policy> <audit> <audit-key> <data-dir> <n>
  *         Makes the n-th audit synchronisation fail while a SET is processed,
  *         and checks that the service fails closed in both cases (n = 1: the
  *         intent could not be recorded, so nothing may be executed; n = 2: the
  *         result could not be recorded, so the client must not be answered).
  */
+
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "cvault/audit.h"
 #include "cvault/auth.h"
@@ -26,6 +34,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 /** Number of audit syncs so far, and the one that must fail (0: never). */
 static unsigned int fail_at, sync_calls;
@@ -152,6 +166,72 @@ static int api(const char *policy_path, const char *audit_path, const char *key_
     return EXIT_SUCCESS;
 }
 
+/** @brief Sleep for roughly the given number of milliseconds. */
+static void pause_ms(unsigned int milliseconds) {
+#ifdef _WIN32
+    Sleep(milliseconds);
+#else
+    struct timespec length = {milliseconds / 1000, (long)(milliseconds % 1000) * 1000000L};
+
+    while (nanosleep(&length, &length) != 0) {
+    }
+#endif
+}
+
+/** @brief Send one request line as client @p id and compare the reply with @p expected. */
+static int exchange(cv_security *security, uint64_t id, const char *line, const char *expected) {
+    unsigned char reply[CV_MAX_RESPONSE_BYTES];
+    size_t written = 0;
+    bool close_after = false;
+
+    CHECK(cv_security_handler(security,
+                              id,
+                              (const unsigned char *)line,
+                              strlen(line),
+                              reply,
+                              sizeof(reply),
+                              &written,
+                              &close_after) == CV_OK);
+    CHECK(written == strlen(expected) && memcmp(reply, expected, written) == 0);
+
+    return EXIT_SUCCESS;
+}
+
+/** @brief The sweep erases expired entries of the volatile storage, and only those. */
+static int expiry(const char *policy_path, const char *audit_path, const char *key_path) {
+    cv_security *security = NULL;
+    size_t removed = 99;
+
+    CHECK(cv_security_open(policy_path, audit_path, key_path, NULL, 2, &security) == CV_OK);
+    CHECK(exchange(security, 1, "AUTH alice test password with spaces\n", "+OK\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "SET alice:short a\n", "+OK\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "SET alice:long b\n", "+OK\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "SET alice:forever c\n", "+OK\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "EXPIRE alice:short 1\n", "+OK\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "EXPIRE alice:long 100000\n", "+OK\n") == EXIT_SUCCESS);
+
+    /* Nothing has expired yet. */
+    CHECK(cv_security_purge_expired(security, &removed) == CV_OK && removed == 0);
+
+    pause_ms(1300);
+
+    /* Expired but not yet erased: invisible to readers, then removed by the sweep. */
+    CHECK(exchange(security, 1, "GET alice:short\n", "$-1\n") == EXIT_SUCCESS);
+    CHECK(cv_security_purge_expired(security, &removed) == CV_OK && removed == 1);
+    CHECK(cv_security_purge_expired(security, &removed) == CV_OK && removed == 0);
+    CHECK(exchange(security, 1, "GET alice:long\n", "$1\nb\n") == EXIT_SUCCESS);
+    CHECK(exchange(security, 1, "GET alice:forever\n", "$1\nc\n") == EXIT_SUCCESS);
+
+    /* Invalid arguments leave the output reset. */
+    removed = 99;
+
+    CHECK(cv_security_purge_expired(NULL, &removed) == CV_ERR_INVALID_ARGUMENT && removed == 0);
+    CHECK(cv_security_purge_expired(security, NULL) == CV_ERR_INVALID_ARGUMENT);
+    CHECK(cv_security_close(security) == CV_OK);
+
+    return EXIT_SUCCESS;
+}
+
 /**
  * @brief Make one audit sync fail during a SET and verify the service fails closed.
  *
@@ -242,6 +322,10 @@ static int faults(const char *policy_path,
 int main(int argc, char **argv) {
     if (argc == 5 && !strcmp(argv[1], "--api")) {
         return api(argv[2], argv[3], argv[4]);
+    }
+
+    if (argc == 5 && !strcmp(argv[1], "--expiry")) {
+        return expiry(argv[2], argv[3], argv[4]);
     }
 
     if (argc == 7 && !strcmp(argv[1], "--fault")) {

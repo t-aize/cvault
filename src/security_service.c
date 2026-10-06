@@ -227,6 +227,110 @@ static cv_status reply(const char *message, unsigned char *out, size_t capacity,
     return CV_OK;
 }
 
+/** One live entry selected by EXPORT; key and value are borrowed from the table. */
+typedef struct {
+    const char *key;
+    const unsigned char *value;
+    size_t length;
+    int64_t ttl; /* Whole seconds left, or #CV_TTL_PERSISTENT. */
+} export_entry;
+
+/** Keys erased by one PURGE command; the client repeats the command for more. */
+#define PURGE_BATCH 100
+
+/** Criteria and output of a table walk that selects entries for EXPORT or PURGE. */
+typedef struct {
+    const cv_auth_session *session; /* Whose permissions filter the entries. */
+    const char *prefix;             /* Literal key prefix. */
+    size_t prefix_length;
+    const char *after;              /* Only keys strictly greater than this (NULL: all). */
+    bool write;                     /* Require write instead of read permission. */
+    export_entry *entries;          /* Selected entries (grown on demand). */
+    size_t count, capacity;
+} selection;
+
+/** @brief True when a key can be written in the text protocol (printable, no space). */
+static bool protocol_key(const char *key) {
+    for (const unsigned char *c = (const unsigned char *)key; *c; ++c) {
+        if (*c < 33 || *c > 126) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/** @brief Table visitor: keep the live entries the session may access under the prefix. */
+static cv_status select_entry(void *opaque,
+                              const char *key,
+                              const unsigned char *value,
+                              size_t length,
+                              bool expires,
+                              uint64_t remaining_ms) {
+    selection *choice = opaque;
+
+    if (strncmp(key, choice->prefix, choice->prefix_length) != 0 || !protocol_key(key) ||
+        (choice->after && strcmp(key, choice->after) <= 0) ||
+        cv_auth_authorize(choice->session, key, choice->write) != CV_OK) {
+        return CV_OK;
+    }
+
+    if (choice->count == choice->capacity) {
+        size_t capacity = choice->capacity ? choice->capacity * 2 : 16;
+        export_entry *grown = realloc(choice->entries, capacity * sizeof(*grown));
+
+        if (!grown) {
+            return CV_ERR_NO_MEMORY;
+        }
+
+        choice->entries = grown;
+        choice->capacity = capacity;
+    }
+
+    choice->entries[choice->count++] = (export_entry){
+        key, value, length, expires ? (int64_t)(remaining_ms / 1000) : CV_TTL_PERSISTENT};
+
+    return CV_OK;
+}
+
+/** @brief qsort() comparison: ascending by key. */
+static int compare_entries(const void *left, const void *right) {
+    return strcmp(((const export_entry *)left)->key, ((const export_entry *)right)->key);
+}
+
+/** @brief The table holding the live data of the active storage backend (NULL if unusable). */
+static const cv_hashtable *backend_table(const cv_security *security) {
+    return security->store ? cv_persist_table(security->store) : security->memory;
+}
+
+/**
+ * @brief Select, sort and return the entries a session may touch under a prefix.
+ *
+ * Expired entries are skipped (one clock reading covers the whole walk). On
+ * success the caller owns `selection.entries`.
+ */
+static cv_status select_entries(const cv_security *security, selection *choice) {
+    const cv_hashtable *table = backend_table(security);
+    cv_status status = table ? cv_hashtable_visit(table, false, select_entry, choice) : CV_ERR_IO;
+
+    if (status != CV_OK) {
+        free(choice->entries);
+
+        choice->entries = NULL;
+        choice->count = 0;
+
+        return status;
+    }
+
+    /* qsort() requires a valid pointer even for an empty array, and there is nothing
+     * to order below two entries. */
+    if (choice->count > 1) {
+        qsort(choice->entries, choice->count, sizeof(*choice->entries), compare_entries);
+    }
+
+    return CV_OK;
+}
+
 /**
  * @brief Outcome of one storage operation.
  *
@@ -238,7 +342,60 @@ typedef struct {
     const unsigned char *value; /**< Borrowed GET value. */
     size_t length;              /**< Length of #value. */
     int64_t ttl;                /**< TTL result. */
+    export_entry *entries;      /**< EXPORT: owned array of borrowed entries, sorted by key. */
+    size_t entry_count;         /**< Number of #entries. */
+    size_t deleted;             /**< PURGE: number of erased keys. */
 } storage_result;
+
+/**
+ * @brief PURGE: erase up to #PURGE_BATCH keys under a prefix that the session may write.
+ *
+ * The keys are copied before the first deletion because deleting from a durable
+ * store replaces its table. Each deletion is journaled like a DEL, so progress
+ * survives a crash; the audit log records the command as a whole.
+ */
+static void purge_prefix(cv_security *security,
+                         const client *peer,
+                         const char *prefix,
+                         storage_result *result) {
+    selection choice = {&peer->session, prefix, strlen(prefix), NULL, true, NULL, 0, 0};
+
+    result->status = select_entries(security, &choice);
+
+    if (result->status != CV_OK) {
+        return;
+    }
+
+    size_t batch = choice.count < PURGE_BATCH ? choice.count : PURGE_BATCH;
+    char (*keys)[CV_MAX_KEY_BYTES + 1] = calloc(batch ? batch : 1, sizeof(*keys));
+
+    if (!keys) {
+        free(choice.entries);
+        result->status = CV_ERR_NO_MEMORY;
+
+        return;
+    }
+
+    for (size_t i = 0; i < batch; ++i) {
+        memcpy(keys[i], choice.entries[i].key, strlen(choice.entries[i].key));
+    }
+
+    free(choice.entries);
+
+    for (size_t i = 0; i < batch && result->status == CV_OK; ++i) {
+        cv_status status = security->store ? cv_persist_delete(security->store, keys[i])
+                                           : cv_hashtable_delete(security->memory, keys[i]);
+
+        if (status == CV_OK) {
+            ++result->deleted;
+        } else if (status != CV_ERR_NOT_FOUND) {
+            result->status = status;
+        }
+    }
+
+    cv_crypto_wipe(keys, batch * sizeof(*keys));
+    free(keys);
+}
 
 /**
  * @brief Run a storage command against the durable store or the volatile table.
@@ -247,10 +404,11 @@ typedef struct {
  * ACL decision and a synchronised intent event in the command handler.
  */
 static void execute_storage(cv_security *security,
+                            const client *peer,
                             const cv_command *command,
                             const char *key,
                             storage_result *result) {
-    *result = (storage_result){CV_ERR_INVALID_ARGUMENT, NULL, 0, CV_TTL_MISSING};
+    *result = (storage_result){CV_ERR_INVALID_ARGUMENT, NULL, 0, CV_TTL_MISSING, NULL, 0, 0};
 
     switch (command->type) {
         case CV_CMD_SET:
@@ -285,6 +443,34 @@ static void execute_storage(cv_security *security,
                                  : cv_hashtable_ttl(security->memory, key, &result->ttl);
             break;
 
+        case CV_CMD_EXPORT: {
+            /* The optional continuation key is copied: the line is not terminated. */
+            char after[CV_MAX_KEY_BYTES + 1] = {0};
+
+            /* A bare EXPORT has no continuation, and memcpy() must never see NULL. */
+            if (command->value_length) {
+                memcpy(after, command->value, command->value_length);
+            }
+
+            selection choice = {&peer->session,
+                                key,
+                                strlen(key),
+                                command->value_length ? after : NULL,
+                                false,
+                                NULL,
+                                0,
+                                0};
+
+            result->status = select_entries(security, &choice);
+            result->entries = choice.entries;
+            result->entry_count = choice.count;
+            break;
+        }
+
+        case CV_CMD_PURGE:
+            purge_prefix(security, peer, key, result);
+            break;
+
         default:
             result->status = CV_ERR_INVALID_ARGUMENT;
             break;
@@ -311,6 +497,12 @@ static cv_audit_operation audit_operation(cv_command_type command) {
 
         case CV_CMD_TTL:
             return CV_AUDIT_TTL;
+
+        case CV_CMD_EXPORT:
+            return CV_AUDIT_EXPORT;
+
+        case CV_CMD_PURGE:
+            return CV_AUDIT_PURGE;
 
         default:
             return CV_AUDIT_INVALID;
@@ -382,6 +574,76 @@ static cv_status authenticate_client(cv_security *security,
 }
 
 /**
+ * @brief Format one page of an EXPORT.
+ *
+ * Reply layout (every number is decimal ASCII):
+ *
+ *     *<entries in this page>\n
+ *     =<key> <ttl> <length>\n<length value bytes>\n      (once per entry)
+ *     +MORE <last key of the page>\n     or     +DONE\n
+ *
+ * As many entries as fit are returned; `+MORE` tells the client to repeat the
+ * command with that key as continuation. TTL is -1 for entries without expiry.
+ */
+static cv_status
+format_export(const storage_result *result, unsigned char *out, size_t capacity, size_t *written) {
+    const size_t page_header = 24;                   /* Room for "*<count>\n". */
+    const size_t trailer = 6 + CV_MAX_KEY_BYTES + 1; /* Room for "+MORE <key>\n". */
+    size_t used = 0, fit = 0;
+
+    for (; fit < result->entry_count; ++fit) {
+        const export_entry *entry = &result->entries[fit];
+        int head =
+            snprintf(NULL, 0, "=%s %" PRId64 " %zu\n", entry->key, entry->ttl, entry->length);
+        size_t size = (size_t)head + entry->length + 1;
+
+        if (page_header + used + size + trailer > capacity) {
+            break;
+        }
+
+        used += size;
+    }
+
+    /* Limits guarantee that a single entry always fits; refuse rather than loop forever. */
+    if (fit == 0 && result->entry_count > 0) {
+        return CV_ERR_LIMIT;
+    }
+
+    size_t position = (size_t)snprintf((char *)out, capacity, "*%zu\n", fit);
+
+    for (size_t i = 0; i < fit; ++i) {
+        const export_entry *entry = &result->entries[i];
+
+        position += (size_t)snprintf((char *)out + position,
+                                     capacity - position,
+                                     "=%s %" PRId64 " %zu\n",
+                                     entry->key,
+                                     entry->ttl,
+                                     entry->length);
+
+        if (entry->length) {
+            memcpy(out + position, entry->value, entry->length);
+        }
+
+        position += entry->length;
+        out[position++] = '\n';
+    }
+
+    if (fit < result->entry_count) {
+        position += (size_t)snprintf((char *)out + position,
+                                     capacity - position,
+                                     "+MORE %s\n",
+                                     result->entries[fit - 1].key);
+    } else {
+        position += (size_t)snprintf((char *)out + position, capacity - position, "+DONE\n");
+    }
+
+    *written = position;
+
+    return CV_OK;
+}
+
+/**
  * @brief Turn an audited storage outcome into a protocol reply.
  *
  * GET framing is length based (`$<n>\n<bytes>\n`) rather than a string
@@ -412,6 +674,22 @@ static cv_status format_storage_response(cv_command_type type,
 
     if (status != CV_OK) {
         return reply("-ERR operation failed\n", out, capacity, written);
+    }
+
+    if (type == CV_CMD_EXPORT) {
+        return format_export(result, out, capacity, written);
+    }
+
+    if (type == CV_CMD_PURGE) {
+        int n = snprintf((char *)out, capacity, ":%zu\n", result->deleted);
+
+        if (n < 0 || (size_t)n >= capacity) {
+            return CV_ERR_LIMIT;
+        }
+
+        *written = (size_t)n;
+
+        return CV_OK;
     }
 
     if (type == CV_CMD_GET) {
@@ -524,7 +802,13 @@ cv_status cv_security_handler(void *context,
     bool write =
         command.type == CV_CMD_SET || command.type == CV_CMD_DEL || command.type == CV_CMD_EXPIRE;
 
-    status = cv_auth_authorize(&peer->session, key, write);
+    /* EXPORT and PURGE name a prefix, not a key: they only require a login here, and
+     * each entry is then filtered by the session's read (EXPORT) or write (PURGE) grants. */
+    if (command.type == CV_CMD_EXPORT || command.type == CV_CMD_PURGE) {
+        status = peer->session.authenticated ? CV_OK : CV_ERR_UNAUTHORIZED;
+    } else {
+        status = cv_auth_authorize(&peer->session, key, write);
+    }
 
     if (status != CV_OK) {
         if (log_event(security, peer, operation, CV_AUDIT_RESULT, CV_ERR_UNAUTHORIZED) != CV_OK) {
@@ -542,21 +826,41 @@ cv_status cv_security_handler(void *context,
      * committed write, so it stops the service without acknowledging success. */
     storage_result result;
 
-    execute_storage(security, &command, key, &result);
+    execute_storage(security, peer, &command, key, &result);
     status = result.status;
 
+    cv_status outcome;
+
     if (log_event(security, peer, operation, CV_AUDIT_RESULT, status) != CV_OK) {
+        outcome = security->failure;
+    } else if (status == CV_ERR_IO || status == CV_ERR_CRYPTO || status == CV_ERR_CORRUPT) {
+        /* Storage corruption or I/O failure is fatal, not a per-request error. */
+        security->failure = status;
+        outcome = status;
+    } else {
+        outcome = format_storage_response(command.type, &result, out, capacity, written);
+    }
+
+    free(result.entries);
+
+    return outcome;
+}
+
+cv_status cv_security_purge_expired(cv_security *security, size_t *removed) {
+    if (removed) {
+        *removed = 0;
+    }
+
+    if (!security || !removed) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (security->failure != CV_OK) {
         return security->failure;
     }
 
-    /* Storage corruption or I/O failure is fatal, not a per-request error. */
-    if (status == CV_ERR_IO || status == CV_ERR_CRYPTO || status == CV_ERR_CORRUPT) {
-        security->failure = status;
-
-        return status;
-    }
-
-    return format_storage_response(command.type, &result, out, capacity, written);
+    return security->store ? cv_persist_purge_expired(security->store, removed)
+                           : cv_hashtable_purge_expired(security->memory, removed);
 }
 
 cv_status cv_security_status(const cv_security *security) {

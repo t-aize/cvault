@@ -97,6 +97,8 @@ typedef struct {
     const char *data;                 /* --data DIRECTORY */
     const char *key_file;             /* --key-file FILE */
     const char *snapshot_interval_ms; /* --snapshot-interval-ms MS */
+    const char *expiry_sweep_ms;      /* --expiry-sweep-ms MS */
+    int compact;                      /* --compact */
     const char *security;             /* --security FILE */
     const char *audit;                /* --audit FILE */
     const char *audit_key_file;       /* --audit-key-file FILE */
@@ -176,6 +178,20 @@ static bool parse_arguments(int argc, char **argv, cli_options *options) {
                    NULL,
                    0,
                    0),
+        OPT_STRING(0,
+                   "expiry-sweep-ms",
+                   &options->expiry_sweep_ms,
+                   "erase expired entries from memory this often (default 1000)",
+                   NULL,
+                   0,
+                   0),
+        OPT_BOOLEAN(0,
+                    "compact",
+                    &options->compact,
+                    "after each snapshot, drop the journal records it covers (needs --data)",
+                    NULL,
+                    0,
+                    OPT_NONEG),
 
         OPT_GROUP("Security"),
         OPT_STRING(0,
@@ -310,19 +326,27 @@ static bool read_number(const char *name,
     return true;
 }
 
+/** Validated settings of a running server: the transport plus the maintenance timers. */
+typedef struct {
+    cv_server_config transport;    /* Passed to cv_server_create(). */
+    uint32_t snapshot_interval_ms; /* Period of the background checkpoints. */
+    uint32_t expiry_sweep_ms;      /* Period of the expired-entry sweep. */
+    bool compact;                  /* Compact the journal after each snapshot. */
+} server_settings;
+
 /**
- * @brief Build the server configuration from the parsed options.
+ * @brief Build the server settings from the parsed options.
  *
- * @param options           Parsed command line.
- * @param config            Starts at the defaults and receives the overrides.
- * @param snapshot_interval Receives the snapshot interval in milliseconds.
+ * @param options  Parsed command line.
+ * @param settings Starts at the defaults and receives the overrides.
  * @return false (after printing a message) when any value is invalid.
  */
-static bool
-build_config(const cli_options *options, cv_server_config *config, uint32_t *snapshot_interval) {
+static bool build_settings(const cli_options *options, server_settings *settings) {
+    cv_server_config *config = &settings->transport;
     unsigned long port = config->port, clients = config->max_clients;
     unsigned long idle = config->idle_timeout_ms, frame = config->frame_timeout_ms;
-    unsigned long shutdown = config->shutdown_timeout_ms, interval = *snapshot_interval;
+    unsigned long shutdown = config->shutdown_timeout_ms, interval = settings->snapshot_interval_ms;
+    unsigned long sweep = settings->expiry_sweep_ms;
 
     if (!read_number("port", options->port, UINT16_MAX, true, &port) ||
         !read_number("max-clients",
@@ -335,7 +359,8 @@ build_config(const cli_options *options, cv_server_config *config, uint32_t *sna
         !read_number(
             "shutdown-timeout-ms", options->shutdown_timeout_ms, INT_MAX, false, &shutdown) ||
         !read_number(
-            "snapshot-interval-ms", options->snapshot_interval_ms, INT_MAX, false, &interval)) {
+            "snapshot-interval-ms", options->snapshot_interval_ms, INT_MAX, false, &interval) ||
+        !read_number("expiry-sweep-ms", options->expiry_sweep_ms, INT_MAX, false, &sweep)) {
         return false;
     }
 
@@ -344,7 +369,9 @@ build_config(const cli_options *options, cv_server_config *config, uint32_t *sna
     config->idle_timeout_ms = (uint32_t)idle;
     config->frame_timeout_ms = (uint32_t)frame;
     config->shutdown_timeout_ms = (uint32_t)shutdown;
-    *snapshot_interval = (uint32_t)interval;
+    settings->snapshot_interval_ms = (uint32_t)interval;
+    settings->expiry_sweep_ms = (uint32_t)sweep;
+    settings->compact = options->compact != 0;
 
     if (options->bind) {
         config->bind_address = options->bind;
@@ -516,7 +543,7 @@ static bool has_serving_options(const cli_options *options) {
     return options->bind || options->port || options->max_clients || options->backend ||
            options->idle_timeout_ms || options->frame_timeout_ms || options->shutdown_timeout_ms ||
            options->data || options->key_file || options->snapshot_interval_ms ||
-           options->security || options->audit;
+           options->compact || options->expiry_sweep_ms || options->security || options->audit;
 }
 
 /**
@@ -555,7 +582,7 @@ static bool check_combinations(const cli_options *options, bool *maintenance) {
     }
 
     if ((options->data == NULL) != (options->key_file == NULL) ||
-        (options->snapshot_interval_ms && !options->data)) {
+        ((options->snapshot_interval_ms || options->compact) && !options->data)) {
         fputs("Persistence requires --data and --key-file together. See --help.\n", stderr);
 
         return false;
@@ -611,12 +638,13 @@ static int run_maintenance(const cli_options *options) {
 
 /** @brief Recover state, serve until a signal arrives, shut down in order. */
 static int run_server(const cli_options *options) {
-    cv_server_config config = cv_server_config_default();
-    uint32_t snapshot_interval = 60000;
+    server_settings settings = {cv_server_config_default(), 60000, 1000, false};
 
-    if (!build_config(options, &config, &snapshot_interval)) {
+    if (!build_settings(options, &settings)) {
         return EXIT_FAILURE;
     }
+
+    cv_server_config config = settings.transport;
 
     /* Recover durable state and validate security before exposing a listener.
      * An invalid policy, key or authenticated file must prevent readiness. */
@@ -695,7 +723,7 @@ static int run_server(const cli_options *options) {
     fflush(stdout);
 
     /* Main loop: step the transport, watch service health, schedule snapshots. */
-    uint64_t last_snapshot = scheduling_ms();
+    uint64_t last_snapshot = scheduling_ms(), last_sweep = last_snapshot;
 
     while (status == CV_OK && !cv_server_is_stopped(server)) {
         if (stop_requested) {
@@ -710,6 +738,20 @@ static int run_server(const cli_options *options) {
             status = cv_security_status(security);
         }
 
+        /* Erase expired entries on a timer, so values whose lifetime is over do not
+         * linger in memory until someone happens to touch them. */
+        if (status == CV_OK && (security || store)) {
+            uint64_t now = scheduling_ms();
+
+            if (now >= last_sweep && now - last_sweep >= settings.expiry_sweep_ms) {
+                size_t removed = 0;
+
+                status = security ? cv_security_purge_expired(security, &removed)
+                                  : cv_persist_purge_expired(store, &removed);
+                last_sweep = now;
+            }
+        }
+
         if (status == CV_OK && store) {
             bool done = false;
 
@@ -717,8 +759,14 @@ static int run_server(const cli_options *options) {
 
             uint64_t now = scheduling_ms();
 
+            /* A finished snapshot makes older journal records redundant. This is a
+             * cheap no-op until the newest snapshot is newer than the journal base. */
+            if (status == CV_OK && done && settings.compact) {
+                status = cv_persist_compact(store);
+            }
+
             if (status == CV_OK && done && !stop_requested && now >= last_snapshot &&
-                now - last_snapshot >= snapshot_interval) {
+                now - last_snapshot >= settings.snapshot_interval_ms) {
                 status = cv_persist_snapshot_start(store);
                 last_snapshot = now;
             }
@@ -736,6 +784,10 @@ static int run_server(const cli_options *options) {
 
         if (status == CV_OK) {
             status = cv_persist_snapshot(store);
+        }
+
+        if (status == CV_OK && settings.compact) {
+            status = cv_persist_compact(store);
         }
     }
 

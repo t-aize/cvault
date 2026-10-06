@@ -61,6 +61,7 @@ typedef struct {
 typedef struct {
     uint64_t sequence;          /**< Sequence number of the last journal record. */
     uint64_t snapshot_sequence; /**< Sequence covered by the newest snapshot. */
+    uint64_t journal_baseline;  /**< Sequence before the first record kept in the journal. */
     bool repaired_tail;         /**< An incomplete final record was truncated on open. */
     bool failed;                /**< The handle is poisoned after an I/O failure. */
 } cv_persist_stats;
@@ -143,6 +144,46 @@ const cv_hashtable *cv_persist_table(const cv_persist *store);
  * The journal is retained; compaction is not implemented yet.
  */
 cv_status cv_persist_snapshot(cv_persist *store);
+
+/**
+ * @brief Wipe and free the expired entries held in memory.
+ *
+ * Expired values are already invisible to readers, but they stay in memory until
+ * something touches them. Calling this on a timer erases them promptly, so a value
+ * whose lifetime is over does not linger in the process. Nothing is written to the
+ * journal: expiry derives from the persisted deadlines, and recovery drops expired
+ * entries by itself. Cost is O(buckets + entries).
+ *
+ * @param store   Store to sweep.
+ * @param removed Receives the number of entries erased; reset to 0 on error.
+ * @return #CV_OK, #CV_ERR_INVALID_ARGUMENT, #CV_ERR_IO (failed handle or clock failure).
+ */
+cv_status cv_persist_purge_expired(cv_persist *store, size_t *removed);
+
+/**
+ * @brief Compact the journal: drop the records already covered by the newest snapshot.
+ *
+ * A snapshot makes older journal records redundant but does not remove them, so
+ * the journal only ever grows. Compaction rewrites it with just the records that
+ * follow the snapshot: a new journal (same identity, baseline equal to the
+ * snapshot sequence) is written next to the old one, synchronised and atomically
+ * renamed over it. A crash at any point leaves either the complete old journal or
+ * the complete new one, and both recover to the same state.
+ *
+ * Take a snapshot first (cv_persist_snapshot() or a finished background
+ * snapshot); with no newer snapshot than the journal baseline there is nothing to
+ * drop and the call succeeds without touching the disk. The dropped records, which
+ * hold the previous encrypted versions of every value, are gone from the file
+ * system afterwards; on SSDs and backups physical erasure cannot be promised.
+ *
+ * Cost is proportional to the records kept (those written since the snapshot).
+ *
+ * @return #CV_OK; #CV_ERR_BUSY while a background snapshot is running;
+ *         #CV_ERR_IO for a failed handle or a failure *before* the swap (the
+ *         journal is untouched and the store stays usable); a failure after the
+ *         swap point poisons the handle, which must then be closed and reopened.
+ */
+cv_status cv_persist_compact(cv_persist *store);
 
 /**
  * @brief Start a snapshot in the background.

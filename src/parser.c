@@ -111,8 +111,7 @@ cv_status cv_parse_line(const unsigned char *line, size_t length, cv_command *ou
         }
     }
 
-    if (command.type == CV_CMD_UNKNOWN || command.type == CV_CMD_EXPORT ||
-        command.type == CV_CMD_PURGE) {
+    if (command.type == CV_CMD_UNKNOWN) {
         return CV_ERR_NOT_IMPLEMENTED;
     }
 
@@ -156,10 +155,25 @@ cv_status cv_parse_line(const unsigned char *line, size_t length, cv_command *ou
 
     bool payload =
         command.type == CV_CMD_AUTH || command.type == CV_CMD_SET || command.type == CV_CMD_EXPIRE;
+    bool has_payload_bytes = command.key_length != command.arguments_length;
 
-    if (!payload) {
-        /* GET / DEL / TTL: the key must be the only argument. */
-        if (command.key_length != command.arguments_length) {
+    if (command.type == CV_CMD_EXPORT && has_payload_bytes) {
+        /* EXPORT <prefix> <after>: the continuation is one more key-like token. */
+        command.value = command.key + command.key_length + 1;
+        command.value_length = command.arguments_length - command.key_length - 1;
+
+        if (!command.value_length || command.value_length > CV_MAX_KEY_BYTES) {
+            return CV_ERR_INVALID_ARGUMENT;
+        }
+
+        for (size_t i = 0; i < command.value_length; ++i) {
+            if (command.value[i] < 33 || command.value[i] > 126) {
+                return CV_ERR_INVALID_ARGUMENT;
+            }
+        }
+    } else if (!payload) {
+        /* GET / DEL / TTL / PURGE / bare EXPORT: the key must be the only argument. */
+        if (has_payload_bytes) {
             return CV_ERR_INVALID_ARGUMENT;
         }
     } else {

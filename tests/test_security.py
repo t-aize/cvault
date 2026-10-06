@@ -70,6 +70,58 @@ class Connection:
 
         return line
 
+    def export_page(self, prefix, after=None):
+        """Send EXPORT and parse one page.
+
+        Returns ``(entries, next_key)``: ``entries`` is a list of ``(key, ttl, value)``
+        and ``next_key`` is the continuation key, or ``None`` after the last page.
+        An error reply is returned as the raw bytes instead.
+        """
+        self.socket.sendall(b"EXPORT " + prefix + (b" " + after if after else b"") + b"\n")
+
+        header = self.reader.readline()
+
+        if not header.startswith(b"*"):
+            return header
+
+        entries = []
+
+        for _ in range(int(header[1:])):
+            key, ttl, length = self.reader.readline().split()
+            value = self.reader.read(int(length))
+
+            if len(value) != int(length) or self.reader.read(1) != b"\n":
+                raise AssertionError("Invalid export entry framing")
+
+            entries.append((key[1:], int(ttl), value))
+
+        trailer = self.reader.readline()
+
+        if trailer == b"+DONE\n":
+            return entries, None
+
+        if not trailer.startswith(b"+MORE "):
+            raise AssertionError(f"Invalid export trailer: {trailer!r}")
+
+        return entries, trailer[6:-1]
+
+    def export_all(self, prefix):
+        """Follow the continuation keys and return every entry plus the number of pages."""
+        entries, after, pages = [], None, 0
+
+        while True:
+            page = self.export_page(prefix, after)
+
+            if isinstance(page, bytes):
+                return page, pages
+
+            pages += 1
+            entries.extend(page[0])
+            after = page[1]
+
+            if after is None:
+                return entries, pages
+
     def auth(self, name=b"alice", password=PASSWORD):
         """Log in, waiting out the server's global verification gate first."""
         # The global verification gate deliberately spans connections.
@@ -362,7 +414,7 @@ class Security(unittest.TestCase):
 
             for command in (b"GET alice:x extra", b"DEL alice:x extra", b"EXPIRE alice:x 9223372036854775808",
                             b"EXPIRE alice:x -9223372036854775809", b"EXPIRE alice:x +1", b"EXPIRE alice:x 1junk",
-                            b"SET  value", b"EXPORT alice:x", b"PURGE", b"get alice:x", b"PING extra"):
+                            b"SET  value", b"PURGE", b"EXPORT", b"get alice:x", b"PING extra"):
                 self.assertEqual(client.command(command), b"-ERR invalid command\n")
 
             self.assertEqual(client.command(b"GET alice:x"), b"original")
@@ -415,6 +467,210 @@ class Security(unittest.TestCase):
             self.assertEqual(client.command(b"GET alice:x"), b"durable value")
 
         self.assertEqual(sum(e["operation"] == "START" for e in self.export()), 2)
+
+    def test_export_returns_only_readable_entries_sorted_with_ttl(self):
+        """EXPORT lists the entries the session may read, sorted, with TTL and exact bytes."""
+        binary = b"binary \x01\x7f\xff end"
+
+        with self.server() as server, server.connect() as alice, server.connect() as writer:
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(writer.auth(b"writer"), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:b two words"), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:a "), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:c " + binary), b"+OK\n")
+            self.assertEqual(alice.command(b"EXPIRE alice:b 1000"), b"+OK\n")
+            self.assertEqual(writer.command(b"SET shared:x from writer"), b"+OK\n")
+
+            entries, after = alice.export_page(b"alice:")
+
+            self.assertIsNone(after)
+            self.assertEqual([entry[0] for entry in entries], [b"alice:a", b"alice:b", b"alice:c"])
+            self.assertEqual([entry[2] for entry in entries], [b"", b"two words", binary])
+            self.assertEqual([entry[1] for entry in entries][::2], [-1, -1])
+            self.assertIn(entries[1][1], (999, 1000))
+
+            # A shorter prefix reaches every readable key below it, and only those.
+            self.assertEqual([entry[0] for entry in alice.export_page(b"a")[0]],
+                             [b"alice:a", b"alice:b", b"alice:c"])
+            self.assertEqual(alice.export_page(b"shared:")[0], [(b"shared:x", -1, b"from writer")])
+            self.assertEqual(alice.export_page(b"other:"), ([], None))
+
+            # The writer may not read what it wrote: nothing is exported, nothing leaks.
+            self.assertEqual(writer.export_page(b"shared:"), ([], None))
+            self.assertEqual(writer.export_page(b"alice:"), ([], None))
+
+            # Continuation keys are exclusive.
+            self.assertEqual([entry[0] for entry in alice.export_page(b"alice:", b"alice:b")[0]],
+                             [b"alice:c"])
+            self.assertEqual(alice.export_page(b"alice:", b"alice:c"), ([], None))
+
+    def test_export_denies_anonymous_clients_and_skips_expired_entries(self):
+        """EXPORT needs a login, and expired entries are not exported."""
+        with self.server() as server, server.connect() as client, server.connect() as anonymous:
+            self.assertEqual(anonymous.export_page(b"alice:"), b"-ERR access denied\n")
+            self.assertEqual(client.auth(), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:soon gone"), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:stay kept"), b"+OK\n")
+            self.assertEqual(client.command(b"EXPIRE alice:soon 1"), b"+OK\n")
+
+            time.sleep(1.3)
+
+            self.assertEqual(client.export_page(b"alice:")[0], [(b"alice:stay", -1, b"kept")])
+            self.assertEqual(anonymous.export_page(b"alice:"), b"-ERR access denied\n")
+
+    def test_export_paginates_large_data_sets_and_maximum_size_values(self):
+        """Entries that do not fit one reply are delivered across pages without gaps or repeats."""
+        with self.server() as server, server.connect() as client:
+            self.assertEqual(client.auth(), b"+OK\n")
+
+            expected = {}
+
+            for index in range(300):
+                key = b"alice:k%03d" % index
+                expected[key] = bytes([65 + index % 26]) * 1000
+
+                self.assertEqual(client.command(b"SET " + key + b" " + expected[key]), b"+OK\n")
+
+            expected[b"alice:zbig"] = b"x" * 65536
+
+            self.assertEqual(client.command(b"SET alice:zbig " + expected[b"alice:zbig"]), b"+OK\n")
+
+            entries, pages = client.export_all(b"alice:")
+
+            self.assertGreater(pages, 4)
+            self.assertEqual([entry[0] for entry in entries], sorted(expected))
+            self.assertEqual({entry[0]: entry[2] for entry in entries}, expected)
+
+    def test_purge_erases_only_writable_keys_in_batches(self):
+        """PURGE removes the keys under a prefix the session may write, 100 at a time."""
+        with self.server() as server, server.connect() as alice, server.connect() as writer, \
+                server.connect() as anonymous:
+            self.assertEqual(anonymous.command(b"PURGE alice:"), b"-ERR access denied\n")
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(writer.auth(b"writer"), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:keep stays"), b"+OK\n")
+            self.assertEqual(writer.command(b"SET shared:x from writer"), b"+OK\n")
+
+            for index in range(5):
+                self.assertEqual(alice.command(b"SET alice:p%d v" % index), b"+OK\n")
+
+            for index in range(150):
+                self.assertEqual(alice.command(b"SET alice:q%03d v" % index), b"+OK\n")
+
+            # Alice may read, but not write, the shared prefix: nothing is erased there.
+            self.assertEqual(alice.command(b"PURGE shared:"), b":0\n")
+            self.assertEqual(alice.command(b"GET shared:x"), b"from writer")
+
+            self.assertEqual(alice.command(b"PURGE alice:p"), b":5\n")
+            self.assertEqual(alice.command(b"GET alice:p3"), b"$-1\n")
+            self.assertEqual(alice.command(b"GET alice:keep"), b"stays")
+
+            # The batch cap: 100, then the remaining 50, then nothing left.
+            self.assertEqual(alice.command(b"PURGE alice:q"), b":100\n")
+            self.assertEqual(alice.command(b"PURGE alice:q"), b":50\n")
+            self.assertEqual(alice.command(b"PURGE alice:q"), b":0\n")
+
+            # The write-only account can erase what it cannot read.
+            self.assertEqual(writer.command(b"PURGE shared:"), b":1\n")
+            self.assertEqual(alice.command(b"GET shared:x"), b"$-1\n")
+            self.assertEqual(alice.export_page(b"alice:")[0], [(b"alice:keep", -1, b"stays")])
+
+    def test_purge_is_durable_and_audited_with_export(self):
+        """A purge survives a restart, and EXPORT/PURGE leave intent and result events."""
+        data, key = self.root / "data", self.root / "store.key"
+
+        self.assertEqual(run("--generate-key", key).returncode, 0)
+
+        extra = ("--data", data, "--key-file", key)
+
+        with self.server(*extra) as server, server.connect() as client, server.connect() as anonymous:
+            self.assertEqual(client.auth(), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:erase one"), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:erase2 two"), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:other three"), b"+OK\n")
+            self.assertEqual(len(client.export_page(b"alice:")[0]), 3)
+            self.assertEqual(client.command(b"PURGE alice:erase"), b":2\n")
+            self.assertEqual(anonymous.export_page(b"alice:"), b"-ERR access denied\n")
+
+        with self.server(*extra) as server, server.connect() as client:
+            self.assertEqual(client.auth(), b"+OK\n")
+            self.assertEqual(client.command(b"GET alice:erase"), b"$-1\n")
+            self.assertEqual(client.command(b"GET alice:erase2"), b"$-1\n")
+            self.assertEqual(client.export_page(b"alice:")[0], [(b"alice:other", -1, b"three")])
+
+        events = self.export()
+        exports = [e for e in events if e["operation"] == "EXPORT"]
+        purges = [e for e in events if e["operation"] == "PURGE"]
+
+        self.assertEqual([e["phase"] for e in exports if e["identity"] == "alice"][:2],
+                         ["intent", "result"])
+        self.assertEqual([e["phase"] for e in purges], ["intent", "result"])
+        self.assertEqual({e["identity"] for e in purges}, {"alice"})
+
+        # The refused anonymous attempt is a single result event with status UNAUTHORIZED (6).
+        refused = [e for e in exports if e["identity"] == "anonymous"]
+
+        self.assertEqual([(e["phase"], e["status"]) for e in refused], [("result", 6)])
+
+    def test_service_sweep_erases_expired_entries(self):
+        """The periodic sweep of the service removes expired entries and leaves the rest."""
+        result = subprocess.run([ARGS.fixture, "--expiry", str(self.policy), str(self.audit), str(self.key)],
+                                capture_output=True, timeout=30)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_server_with_a_fast_sweep_stays_healthy(self):
+        """A very short --expiry-sweep-ms neither disturbs live data nor the server."""
+        with self.server("--expiry-sweep-ms", "20") as server, server.connect() as client:
+            self.assertEqual(client.auth(), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:gone short lived"), b"+OK\n")
+            self.assertEqual(client.command(b"SET alice:stay long lived"), b"+OK\n")
+            self.assertEqual(client.command(b"EXPIRE alice:gone 1"), b"+OK\n")
+
+            time.sleep(1.4)
+
+            self.assertEqual(client.command(b"GET alice:gone"), b"$-1\n")
+            self.assertEqual(client.command(b"TTL alice:gone"), b":-2\n")
+            self.assertEqual(client.command(b"GET alice:stay"), b"long lived")
+            self.assertEqual(client.command(b"SET alice:gone again"), b"+OK\n")
+            self.assertEqual(client.command(b"GET alice:gone"), b"again")
+
+    def test_compact_option_keeps_the_journal_small_and_loses_nothing(self):
+        """With --compact the journal is rewritten after each snapshot and no data is lost."""
+        data, key = self.root / "data", self.root / "store.key"
+
+        self.assertEqual(run("--generate-key", key).returncode, 0)
+
+        extra = ("--data", data, "--key-file", key, "--snapshot-interval-ms", "50", "--compact")
+        journal = data / "journal.aof"
+
+        with self.server(*extra) as server, server.connect() as client:
+            self.assertEqual(client.auth(), b"+OK\n")
+
+            for index in range(40):
+                self.assertEqual(client.command(b"SET alice:k%d " % index + b"x" * 2000), b"+OK\n")
+
+            # The baseline in the journal header (offset 24) reaches the snapshot sequence
+            # and the file shrinks from about 84 KB to just its header.
+            deadline = time.monotonic() + 10
+
+            while time.monotonic() < deadline:
+                content = journal.read_bytes()
+
+                if struct.unpack_from("<Q", content, 24)[0] == 40 and len(content) < 1000:
+                    break
+
+                time.sleep(0.05)
+            else:
+                self.fail("the journal was not compacted")
+
+            self.assertEqual(client.command(b"GET alice:k39"), b"x" * 2000)
+
+        with self.server(*extra) as server, server.connect() as client:
+            self.assertEqual(client.auth(), b"+OK\n")
+            self.assertEqual(client.command(b"GET alice:k0"), b"x" * 2000)
+            self.assertEqual(client.command(b"GET alice:k39"), b"x" * 2000)
+            self.assertEqual(client.command(b"SET alice:after restart"), b"+OK\n")
 
     def test_audit_wrong_key_tampering_reorder_and_torn_tail_fail_closed(self):
         """Any modification of the audit file, or a wrong key, is detected and refused."""

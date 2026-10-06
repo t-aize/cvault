@@ -64,8 +64,18 @@ struct cv_audit {
 };
 
 /** Operation names indexed by #cv_audit_operation, used by the JSON export. */
-static const char *operations[] = {
-    "", "AUTH", "SET", "GET", "DEL", "EXPIRE", "TTL", "INVALID", "START", "STOP"};
+static const char *operations[] = {"",
+                                   "AUTH",
+                                   "SET",
+                                   "GET",
+                                   "DEL",
+                                   "EXPIRE",
+                                   "TTL",
+                                   "INVALID",
+                                   "START",
+                                   "STOP",
+                                   "EXPORT",
+                                   "PURGE"};
 
 /**
  * @brief Check that an identity only uses [A-Za-z0-9_.-] and fits 64 bytes.
@@ -136,7 +146,7 @@ static cv_status validate_record(const cv_disk_record *record) {
     const unsigned char *payload = record->value;
 
     if (payload[EVENT_OPERATION_OFFSET] < CV_AUDIT_AUTH ||
-        payload[EVENT_OPERATION_OFFSET] > CV_AUDIT_STOP ||
+        payload[EVENT_OPERATION_OFFSET] > CV_AUDIT_PURGE ||
         payload[EVENT_PHASE_OFFSET] < CV_AUDIT_INTENT ||
         payload[EVENT_PHASE_OFFSET] > CV_AUDIT_RESULT ||
         payload[EVENT_STATUS_OFFSET] > CV_ERR_BUSY || !payload[EVENT_IDENTITY_LENGTH_OFFSET] ||
@@ -339,7 +349,7 @@ cv_audit_open(const char *path, const unsigned char key[32], bool create, cv_aud
 
 cv_status cv_audit_record(cv_audit *audit, const cv_audit_event *event) {
     if (!audit || !event || !valid_identity(event->identity) || event->operation < CV_AUDIT_AUTH ||
-        event->operation > CV_AUDIT_STOP || event->phase < CV_AUDIT_INTENT ||
+        event->operation > CV_AUDIT_PURGE || event->phase < CV_AUDIT_INTENT ||
         event->phase > CV_AUDIT_RESULT || event->result < CV_OK || event->result > CV_ERR_BUSY) {
         return CV_ERR_INVALID_ARGUMENT;
     }

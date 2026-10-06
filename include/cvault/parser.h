@@ -13,10 +13,13 @@
  * | `DEL <key>`                     | Delete a key.                               |
  * | `EXPIRE <key> <seconds>`        | Set a relative time to live (signed int64). |
  * | `TTL <key>`                     | Read the remaining time to live.            |
+ * | `EXPORT <prefix> [<after>]`     | Export a page of the readable keys under a  |
+ * |                                 | prefix; `<after>` continues a previous page.|
+ * | `PURGE <prefix>`                | Erase the writable keys under a prefix.     |
  * | `PING` / `QUIT`                 | Liveness check / close the connection.      |
  *
- * `EXPORT` and `PURGE` are reserved and answer #CV_ERR_NOT_IMPLEMENTED. The
- * full security grammar is documented in docs/security.md.
+ * Unknown command words answer #CV_ERR_NOT_IMPLEMENTED. The full security
+ * grammar is documented in docs/security.md.
  */
 
 #ifndef CVAULT_PARSER_H
@@ -36,8 +39,8 @@ typedef enum {
     CV_CMD_DEL,         /**< Delete a value. */
     CV_CMD_EXPIRE,      /**< Attach a relative expiration. */
     CV_CMD_TTL,         /**< Query the remaining lifetime. */
-    CV_CMD_EXPORT,      /**< Reserved: per-user export. */
-    CV_CMD_PURGE,       /**< Reserved: explicit expiry sweep. */
+    CV_CMD_EXPORT,      /**< Export the readable keys under a prefix, one page at a time. */
+    CV_CMD_PURGE,       /**< Erase the writable keys under a prefix. */
     CV_CMD_PING,        /**< Liveness probe, allowed before authentication. */
     CV_CMD_QUIT         /**< Ask the server to close the connection. */
 } cv_command_type;
@@ -57,8 +60,9 @@ typedef struct {
     const unsigned char *arguments;
     size_t arguments_length;
 
-    /** Key slice (the user name for AUTH) and the payload slice that follows it:
-     * the password for AUTH, the value for SET, the decimal text for EXPIRE. */
+    /** Key slice (the user name for AUTH, the prefix for EXPORT and PURGE) and the
+     * payload slice that follows it: the password for AUTH, the value for SET, the
+     * decimal text for EXPIRE, the optional continuation key for EXPORT. */
     const unsigned char *key, *value;
     size_t key_length, value_length;
 
@@ -78,7 +82,7 @@ typedef struct {
  * @param out    Receives the command; reset to all-zero on every error.
  * @return #CV_OK on success; #CV_ERR_INVALID_ARGUMENT for malformed input;
  *         #CV_ERR_LIMIT when a size bound is exceeded; #CV_ERR_NOT_IMPLEMENTED
- *         for unknown or reserved command words.
+ *         for unknown command words.
  */
 cv_status cv_parse_line(const unsigned char *line, size_t length, cv_command *out);
 

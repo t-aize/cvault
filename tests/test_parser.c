@@ -145,9 +145,20 @@ static int explicit_cases(void) {
         {LINE("AUTH  secret\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
         {LINE("AUTH\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
 
-        /* Reserved and unknown commands. */
-        {LINE("EXPORT x\n"), CV_ERR_NOT_IMPLEMENTED, 0, NULL, NULL, 0},
-        {LINE("PURGE\n"), CV_ERR_NOT_IMPLEMENTED, 0, NULL, NULL, 0},
+        /* EXPORT takes a prefix and an optional continuation key; PURGE only a prefix. */
+        {LINE("EXPORT alice:\n"), CV_OK, CV_CMD_EXPORT, "alice:", NULL, 0},
+        {LINE("EXPORT alice: alice:key\n"), CV_OK, CV_CMD_EXPORT, "alice:", "alice:key", 0},
+        {LINE("EXPORT a \r\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("EXPORT a b c\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("EXPORT a b \n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("EXPORT a  b\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("EXPORT a b\x01\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("EXPORT\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("PURGE alice:\n"), CV_OK, CV_CMD_PURGE, "alice:", NULL, 0},
+        {LINE("PURGE alice: more\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+        {LINE("PURGE\n"), CV_ERR_INVALID_ARGUMENT, 0, NULL, NULL, 0},
+
+        /* Unknown commands. */
         {LINE("HELLO\n"), CV_ERR_NOT_IMPLEMENTED, 0, NULL, NULL, 0},
         {LINE("get key\n"), CV_ERR_NOT_IMPLEMENTED, 0, NULL, NULL, 0},
         {LINE("Get key\n"), CV_ERR_NOT_IMPLEMENTED, 0, NULL, NULL, 0},
@@ -220,6 +231,19 @@ static int size_boundaries(void) {
     CHECK(cv_parse_line(line, length, &command) == CV_ERR_INVALID_ARGUMENT);
 
     /* Values: up to 65536 bytes; one more is a limit error, not a syntax error. */
+    length = build(line, "EXPORT p ", CV_MAX_KEY_BYTES, "\n");
+
+    CHECK(cv_parse_line(line, length, &command) == CV_OK &&
+          command.value_length == CV_MAX_KEY_BYTES);
+
+    length = build(line, "EXPORT p ", CV_MAX_KEY_BYTES + 1, "\n");
+
+    CHECK(cv_parse_line(line, length, &command) == CV_ERR_INVALID_ARGUMENT);
+
+    length = build(line, "PURGE ", CV_MAX_KEY_BYTES + 1, "\n");
+
+    CHECK(cv_parse_line(line, length, &command) == CV_ERR_INVALID_ARGUMENT);
+
     length = build(line, "SET k ", CV_MAX_VALUE_BYTES, "\n");
 
     CHECK(cv_parse_line(line, length, &command) == CV_OK &&
@@ -257,6 +281,9 @@ static const char *const seeds[] = {
     "EXPIRE key 120\n",
     "EXPIRE key -9223372036854775808\n",
     "AUTH alice a password\n",
+    "EXPORT alice:\n",
+    "EXPORT alice: alice:key\r\n",
+    "PURGE alice:\n",
 };
 
 /** @brief Compare against the reference, reporting the first disagreement. */

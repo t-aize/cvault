@@ -8,14 +8,44 @@ name: C build and tests
 on:
   push:
   pull_request:
+  # A long fuzzing campaign every Monday, and on demand from the Actions tab.
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Long fuzzing campaign under AddressSanitizer + UBSan (see docs/fuzzing.md). The
+  # seed changes every run and is printed on failure, so a finding can be replayed.
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-26.04
+    container: gcc:16.2.0-trixie
+    env:
+      CC: gcc
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bootstrap dependencies
+        run: apt-get update && apt-get install -y ca-certificates curl pkg-config python3 python-is-python3
+      - name: Install pinned build tools and libsodium
+        run: python scripts/bootstrap-linux.py
+      - name: Build the campaign with sanitizers
+        run: |
+          cmake --preset asan
+          cmake --build --preset asan --target cvault-fuzz-campaign --parallel
+      - name: Run the campaign
+        run: >
+          build/asan/tests/cvault-fuzz-campaign --iterations 2000000 --seed ${{ github.run_number }}
+          --corpus tests/fuzz/corpus --scratch /tmp
+
   # GCC and Clang, each with debug, release and AddressSanitizer + UBSan presets,
   # inside a Debian container so the toolchain does not depend on the runner image.
   linux:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-26.04
     container: gcc:16.2.0-trixie
     strategy:
@@ -73,6 +103,7 @@ jobs:
 
   # Apple Clang and Homebrew LLVM on Apple Silicon.
   macos:
+    if: github.event_name != 'schedule'
     # The explicit macOS 26 label selects the current Apple Silicon image.
     runs-on: macos-26
     strategy:
@@ -123,6 +154,7 @@ jobs:
 
   # MinGW GCC (w64devkit) and MSVC (Visual Studio 2026), Debug and Release.
   windows:
+    if: github.event_name != 'schedule'
     runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false

@@ -9,10 +9,12 @@
  *    Every other known command needs a key: a run of printable ASCII characters
  *    (33..126) of 1..256 bytes (1..64 for the AUTH user name).
  *  - AUTH, SET and EXPIRE carry a payload: everything after exactly one space that
- *    follows the key. GET, DEL and TTL take only the key.
+ *    follows the key. GET, DEL, TTL and PURGE take only the key. EXPORT takes a
+ *    prefix and optionally one more token (1..256 printable characters) after
+ *    which the next page starts.
  *  - AUTH passwords have 1..1024 bytes, SET values 0..65536 bytes (more is a limit
  *    error) and EXPIRE takes a decimal signed 64-bit integer.
- *  - Unknown and reserved command words are "not implemented".
+ *  - Unknown command words are "not implemented".
  */
 
 #include "parser_reference.h"
@@ -150,7 +152,7 @@ cv_status reference_parse(const unsigned char *line, size_t length, reference_co
 
     cv_command_type type = lookup(line, word_end);
 
-    if (type == CV_CMD_UNKNOWN || type == CV_CMD_EXPORT || type == CV_CMD_PURGE) {
+    if (type == CV_CMD_UNKNOWN) {
         return CV_ERR_NOT_IMPLEMENTED;
     }
 
@@ -189,8 +191,10 @@ cv_status reference_parse(const unsigned char *line, size_t length, reference_co
     }
 
     bool has_payload = type == CV_CMD_AUTH || type == CV_CMD_SET || type == CV_CMD_EXPIRE;
+    bool has_extra = key_length != arguments_length;
+    bool continuation = type == CV_CMD_EXPORT && has_extra;
 
-    if (!has_payload && key_length != arguments_length) {
+    if (!has_payload && !continuation && has_extra) {
         return CV_ERR_INVALID_ARGUMENT;
     }
 
@@ -205,7 +209,7 @@ cv_status reference_parse(const unsigned char *line, size_t length, reference_co
     out->key_offset = arguments;
     out->key_length = key_length;
 
-    if (has_payload) {
+    if (has_payload || continuation) {
         out->has_value = true;
         out->value_offset = arguments + key_length + 1;
         out->value_length = arguments_length - key_length - 1;
@@ -221,6 +225,18 @@ cv_status reference_parse(const unsigned char *line, size_t length, reference_co
     } else if (type == CV_CMD_EXPIRE &&
                !reference_integer(line + out->value_offset, out->value_length, &out->seconds)) {
         status = CV_ERR_INVALID_ARGUMENT;
+    } else if (continuation) {
+        if (out->value_length == 0 || out->value_length > CV_MAX_KEY_BYTES) {
+            status = CV_ERR_INVALID_ARGUMENT;
+        }
+
+        for (size_t i = 0; i < out->value_length && status == CV_OK; ++i) {
+            unsigned char c = line[out->value_offset + i];
+
+            if (c < 33 || c > 126) {
+                status = CV_ERR_INVALID_ARGUMENT;
+            }
+        }
     }
 
     if (status != CV_OK) {

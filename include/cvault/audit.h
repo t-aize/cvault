@@ -51,7 +51,9 @@ typedef enum {
     CV_AUDIT_TTL,      /**< TTL command. */
     CV_AUDIT_INVALID,  /**< Malformed or unsupported request. */
     CV_AUDIT_START,    /**< Service start-up. */
-    CV_AUDIT_STOP      /**< Orderly service shutdown. */
+    CV_AUDIT_STOP,     /**< Orderly service shutdown. */
+    CV_AUDIT_EXPORT,   /**< EXPORT command (added after the first release of the format). */
+    CV_AUDIT_PURGE     /**< PURGE command (added after the first release of the format). */
 } cv_audit_operation;
 
 /** Moment of an operation an event refers to. */

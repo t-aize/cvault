@@ -17,6 +17,9 @@
  *     TTL <key>             prints "<status> <seconds>"
  *     STATS                 prints "<status> <seq> <snapshot seq> <repaired> <failed>"
  *     SNAP / ASYNC / WAIT   synchronous, background start, wait for a snapshot
+ *     COMPACT               drop the journal records covered by the snapshot
+ *     SWEEP                 erase expired entries; prints "<status> <removed> <entries left>"
+ *     BASE                  prints "<status> <journal baseline sequence>"
  *     POLL                  prints "<status> <done>"
  *     NOW <epoch-ms>        move the deterministic wall clock
  *     CRASH                 exit immediately without closing the store
@@ -215,6 +218,27 @@ int main(int argc, char **argv) {
                    stats.snapshot_sequence,
                    (int)stats.repaired_tail,
                    (int)stats.failed);
+            fflush(stdout);
+            continue;
+        } else if (strcmp(operation, "SWEEP") == 0) {
+            size_t removed = 0;
+            cv_hashtable_stats table = {0};
+
+            status = cv_persist_purge_expired(store, &removed);
+
+            (void)cv_hashtable_get_stats(cv_persist_table(store), &table);
+
+            printf("%d %zu %zu\n", (int)status, removed, table.entries);
+            fflush(stdout);
+            continue;
+        } else if (strcmp(operation, "COMPACT") == 0) {
+            status = cv_persist_compact(store);
+        } else if (strcmp(operation, "BASE") == 0) {
+            cv_persist_stats stats;
+
+            status = cv_persist_get_stats(store, &stats);
+
+            printf("%d %" PRIu64 "\n", (int)status, stats.journal_baseline);
             fflush(stdout);
             continue;
         } else if (strcmp(operation, "SNAP") == 0) {

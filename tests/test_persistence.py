@@ -453,6 +453,179 @@ class Persistence(unittest.TestCase):
         with Session(self.data, self.key) as session:
             session.command("GET key", "0 01")
 
+    def test_compaction_drops_snapshotted_records_and_preserves_state(self):
+        """Compaction keeps only the records after the snapshot and loses no data."""
+        journal = self.data / "journal.aof"
+
+        with Session(self.data, self.key) as session:
+            for index in range(60):
+                session.command(f"SET key{index} " + "ab" * 64, OK)
+
+            session.command("SET key0 " + "cd" * 64, OK)
+            session.command("DEL key1", OK)
+            session.command("SNAP", OK)
+            session.command("SET after 01", OK)
+            session.command("EXPIRE key2 100000", OK)
+            session.command("BASE", "0 0")
+
+            before = journal.stat().st_size
+
+            session.command("COMPACT", OK)
+            session.command("BASE", "0 62")
+            session.command("STATS", "0 64 62 0 0")
+
+            self.assertLess(journal.stat().st_size, before // 4)
+
+            # Appending continues in the new journal.
+            session.command("SET later 02", OK)
+
+        with Session(self.data, self.key) as session:
+            session.command("STATS", "0 65 62 0 0")
+            session.command("GET key0", "0 " + "cd" * 64)
+            session.command("GET key1", "3")
+            session.command("GET key59", "0 " + "ab" * 64)
+            session.command("GET after", "0 01")
+            session.command("GET later", "0 02")
+
+            self.assertGreaterEqual(int(session.command("TTL key2").split()[1]), 99990)
+
+            # A second cycle works the same way.
+            session.command("SNAP", OK)
+            session.command("COMPACT", OK)
+            session.command("BASE", "0 65")
+
+        with Session(self.data, self.key) as session:
+            session.command("STATS", "0 65 65 0 0")
+            session.command("GET key59", "0 " + "ab" * 64)
+            session.command("GET later", "0 02")
+
+    def test_compaction_without_a_newer_snapshot_changes_nothing(self):
+        """With nothing to drop, compaction succeeds and leaves the journal byte for byte alone."""
+        journal = self.data / "journal.aof"
+
+        with Session(self.data, self.key) as session:
+            session.command("COMPACT", OK)
+            session.command("SET a 01", OK)
+            session.command("COMPACT", OK)
+
+            unchanged = journal.read_bytes()
+
+            session.command("SNAP", OK)
+            session.command("COMPACT", OK)
+            session.command("BASE", "0 1")
+
+            compacted = journal.read_bytes()
+
+            session.command("COMPACT", OK)
+
+            self.assertEqual(journal.read_bytes(), compacted)
+            self.assertNotEqual(compacted, unchanged)
+
+        with Session(self.data, self.key) as session:
+            session.command("GET a", "0 01")
+
+    def test_compaction_crash_windows_recover_or_fail_closed(self):
+        """Every state a crash can leave behind either recovers fully or is refused."""
+        with Session(self.data, self.key) as session:
+            session.command("SET one 01", OK)
+            session.command("SNAP", OK)
+
+            older_snapshot = (self.data / "snapshot.cvs").read_bytes()
+
+            session.command("SET two 02", OK)
+            session.command("SNAP", OK)
+            session.command("SET three 03", OK)
+
+        before = self.replica("before-compaction")
+
+        with Session(self.data, self.key) as session:
+            session.command("COMPACT", OK)
+
+        # Crash after the new snapshot but before the journal swap: old journal.
+        with Session(before, self.key) as session:
+            session.command("STATS", "0 3 2 0 0")
+            session.command("GET three", "0 03")
+
+        # Crash after the swap: new journal and snapshot.
+        with Session(self.data, self.key) as session:
+            session.command("STATS", "0 3 2 0 0")
+            session.command("GET one", "0 01")
+            session.command("GET two", "0 02")
+            session.command("GET three", "0 03")
+
+        # A new journal paired with an older snapshot lost history: refuse it.
+        (self.data / "snapshot.cvs").write_bytes(older_snapshot)
+
+        Session(self.data, self.key, expected=CORRUPT)
+
+        # So is a new journal without any snapshot.
+        (self.data / "snapshot.cvs").unlink()
+
+        Session(self.data, self.key, expected=CORRUPT)
+
+    def test_compaction_is_refused_while_a_snapshot_runs(self):
+        """A background snapshot owns the journal bookkeeping until it is reaped."""
+        with Session(self.data, self.key) as session:
+            session.command("SET key 01", OK)
+            session.command("ASYNC", OK)
+            session.command("COMPACT", BUSY)
+            session.command("WAIT", OK)
+            session.command("COMPACT", OK)
+            session.command("BASE", "0 1")
+
+    def test_compaction_failure_before_the_swap_keeps_the_old_journal(self):
+        """Faults while writing the replacement leave the journal, the data and the handle intact."""
+        for fault in (1, 2):
+            data = self.root / f"fault-{fault}"
+
+            with Session(data, self.key, faults=True) as session:
+                session.command("SET k1 01", OK)
+                session.command("SNAP", OK)
+                session.command("SET k2 02", OK)
+
+                before = (data / "journal.aof").read_bytes()
+
+                session.command(f"FAULT {fault}", OK)
+                session.command("COMPACT", IO)
+
+                self.assertEqual((data / "journal.aof").read_bytes(), before)
+                self.assertEqual(list(data.glob(".journal-*.tmp")), [])
+
+                # The handle is not poisoned: it keeps working and can compact later.
+                session.command("STATS", "0 2 1 0 0")
+                session.command("SET k3 03", OK)
+                session.command("COMPACT", OK)
+                session.command("BASE", "0 1")
+
+            with Session(data, self.key) as session:
+                session.command("GET k1", "0 01")
+                session.command("GET k2", "0 02")
+                session.command("GET k3", "0 03")
+
+    def test_sweep_erases_expired_entries_from_memory(self):
+        """The sweep removes entries whose time is up, and nothing else."""
+        with Session(self.data, self.key) as session:
+            session.command("SET keep 01", OK)
+            session.command("SET soon 02", OK)
+            session.command("EXPIRE soon 1", OK)
+            session.command("SET later 03", OK)
+            session.command("EXPIRE later 100000", OK)
+            session.command("SWEEP", "0 0 3")
+
+            time.sleep(1.3)
+
+            # Expired entries are already invisible but still stored until the sweep.
+            session.command("GET soon", "3")
+            session.command("SWEEP", "0 1 2")
+            session.command("SWEEP", "0 0 2")
+            session.command("GET keep", "0 01")
+            session.command("GET later", "0 03")
+            session.command("SNAP", OK)
+
+        with Session(self.data, self.key) as session:
+            session.command("GET soon", "3")
+            session.command("SWEEP", "0 0 2")
+
     def test_orphan_temporary_files_are_ignored(self):
         """Leftover snapshot temporary files from a crash do not affect recovery."""
         self.seed()
@@ -644,7 +817,8 @@ class Persistence(unittest.TestCase):
     def test_server_rejects_incomplete_persistence_options(self):
         """--data and --key-file must be given together; other combinations are errors."""
         for options in (["--data", str(self.data)], ["--key-file", str(self.key)],
-                        ["--snapshot-interval-ms", "100"], ["--generate-key", str(self.key), "--port", "0"]):
+                        ["--snapshot-interval-ms", "100"], ["--compact"],
+                        ["--generate-key", str(self.key), "--port", "0"]):
             result = subprocess.run([ARGS.server, *options], capture_output=True, timeout=5)
 
             self.assertNotEqual(result.returncode, 0)

@@ -88,6 +88,19 @@ cv_status cv_security_handler(void *context,
 void cv_security_disconnect(void *context, uint64_t id);
 
 /**
+ * @brief Erase expired entries from the storage backend in use.
+ *
+ * Meant to be called on a timer by the owner of the event loop. It is not an
+ * audited operation: it only removes values that are already unreadable.
+ *
+ * @param security Service whose storage is swept.
+ * @param removed  Receives the number of erased entries; reset to 0 on error.
+ * @return #CV_OK, #CV_ERR_INVALID_ARGUMENT, the fatal error that poisoned the
+ *         service, or a storage/clock error.
+ */
+cv_status cv_security_purge_expired(cv_security *security, size_t *removed);
+
+/**
  * @brief Report whether the service is still healthy.
  *
  * The owner must check it after every network step and stop on a non-OK value.

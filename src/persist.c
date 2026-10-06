@@ -615,6 +615,22 @@ const cv_hashtable *cv_persist_table(const cv_persist *store) {
     return store && !store->failed ? store->table : NULL;
 }
 
+cv_status cv_persist_purge_expired(cv_persist *store, size_t *removed) {
+    if (removed) {
+        *removed = 0;
+    }
+
+    if (!store || !removed) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (store->failed) {
+        return CV_ERR_IO;
+    }
+
+    return cv_hashtable_purge_expired(store->table, removed);
+}
+
 cv_status cv_persist_get_stats(const cv_persist *store, cv_persist_stats *out) {
     if (out) {
         memset(out, 0, sizeof(*out));
@@ -626,6 +642,7 @@ cv_status cv_persist_get_stats(const cv_persist *store, cv_persist_stats *out) {
 
     out->sequence = store->stream.sequence;
     out->snapshot_sequence = store->snapshot_sequence;
+    out->journal_baseline = store->stream.baseline;
     out->repaired_tail = store->repaired_tail;
     out->failed = store->failed;
 
@@ -666,14 +683,18 @@ static cv_status snapshot_entry(void *opaque,
     return status;
 }
 
-/** @brief Choose a unique, unpredictable temporary file name for a snapshot. */
-static cv_status temporary_path(cv_persist *store) {
+/**
+ * @brief Choose a unique, unpredictable temporary file name.
+ *
+ * @param prefix Short label, for example ".snapshot-" or ".journal-".
+ */
+static cv_status temporary_path(cv_persist *store, const char *prefix) {
     unsigned char nonce[16];
     char hex[33], name[64];
 
     randombytes_buf(nonce, sizeof(nonce));
     sodium_bin2hex(hex, sizeof(hex), nonce, sizeof(nonce));
-    (void)snprintf(name, sizeof(name), ".snapshot-%s.tmp", hex);
+    (void)snprintf(name, sizeof(name), "%s%s.tmp", prefix, hex);
 
     free(store->temporary);
 
@@ -754,7 +775,7 @@ cv_status cv_persist_snapshot(cv_persist *store) {
     cv_status status = store->clock(store->clock_context, &wall);
 
     if (status == CV_OK) {
-        status = temporary_path(store);
+        status = temporary_path(store, ".snapshot-");
     }
 
     if (status == CV_OK) {
@@ -810,6 +831,206 @@ static void child_close_descriptors(void) {
 }
 #endif
 
+/**
+ * @brief Open the journal at its path and position it for appending.
+ *
+ * Authenticates the header and every record, restores the stream state (sequence
+ * and previous tag) and leaves the file positioned after the last record. Used
+ * after the journal file has been replaced.
+ */
+static cv_status attach_journal(cv_persist *store) {
+    cv_status status = cv_io_open(store->journal_path, false, false, true, &store->journal);
+
+    if (status != CV_OK) {
+        return status;
+    }
+
+    status = cv_stream_open(store->journal, false, store->key, &store->stream);
+
+    if (status == CV_OK && memcmp(store->uuid, store->stream.header + 8, 16) != 0) {
+        status = CV_ERR_CORRUPT;
+    }
+
+    uint64_t good = CV_FILE_HEADER_BYTES;
+
+    while (status == CV_OK) {
+        cv_disk_record record;
+        bool eof, partial;
+
+        status = cv_stream_next(&store->stream, &record, &eof, &partial);
+
+        if (status != CV_OK) {
+            break;
+        }
+
+        if (eof) {
+            if (partial) {
+                status = CV_ERR_CORRUPT;
+            } else {
+                clearerr(store->journal);
+                status = cv_io_seek(store->journal, good);
+            }
+
+            break;
+        }
+
+        if (record.operation == CV_RECORD_END) {
+            status = CV_ERR_CORRUPT;
+            break;
+        }
+
+        status = cv_io_tell(store->journal, &good);
+    }
+
+    return status;
+}
+
+/**
+ * @brief Write the replacement journal: the records that follow the snapshot.
+ *
+ * The old journal is read through its own handle (a second handle would not be
+ * allowed on Windows) and its position is restored afterwards, so that it stays
+ * fully usable if anything fails. The temporary file is removed on failure.
+ */
+static cv_status write_compacted_journal(cv_persist *store) {
+    uint64_t end = 0;
+    FILE *file = NULL;
+    cv_record_stream reader = {0}, writer = {0};
+    cv_status status = temporary_path(store, ".journal-");
+
+    if (status == CV_OK) {
+        status = cv_io_tell(store->journal, &end);
+    }
+
+    if (status == CV_OK) {
+        status = cv_io_seek(store->journal, 0);
+    }
+
+    if (status == CV_OK) {
+        status = cv_stream_open(store->journal, false, store->key, &reader);
+    }
+
+    if (status == CV_OK) {
+        status = cv_io_open(store->temporary, true, true, true, &file);
+    }
+
+    if (status == CV_OK) {
+        status = cv_stream_create(
+            file, false, store->uuid, store->snapshot_sequence, store->key, &writer);
+    }
+
+    while (status == CV_OK) {
+        cv_disk_record record;
+        bool eof, partial;
+
+        status = cv_stream_next(&reader, &record, &eof, &partial);
+
+        if (status != CV_OK) {
+            break;
+        }
+
+        if (eof) {
+            if (partial) {
+                status = CV_ERR_CORRUPT;
+            }
+
+            break;
+        }
+
+        /* Records up to the snapshot sequence are redundant; keep the rest unchanged. */
+        if (reader.sequence > store->snapshot_sequence) {
+            status = cv_stream_append(&writer,
+                                      record.operation,
+                                      record.key,
+                                      record.value,
+                                      record.value_length,
+                                      record.expiry_ms);
+        }
+    }
+
+    /* Both journals must describe the same history up to the last record. */
+    if (status == CV_OK && writer.sequence != store->stream.sequence) {
+        status = CV_ERR_CORRUPT;
+    }
+
+    if (status == CV_OK && file) {
+        status = cv_io_sync(file);
+    }
+
+    cv_stream_clear(&reader);
+    cv_stream_clear(&writer);
+
+    if (file && fclose(file) != 0 && status == CV_OK) {
+        status = CV_ERR_IO;
+    }
+
+    /* Put the old journal back into its appending state, whatever happened. */
+    clearerr(store->journal);
+
+    cv_status restored = cv_io_seek(store->journal, end);
+
+    if (status == CV_OK) {
+        status = restored;
+    }
+
+    if (status != CV_OK && file) {
+        cv_io_remove(store->temporary);
+    }
+
+    return status;
+}
+
+cv_status cv_persist_compact(cv_persist *store) {
+    if (!store) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (store->failed) {
+        return CV_ERR_IO;
+    }
+
+    if (store->worker) {
+        return CV_ERR_BUSY;
+    }
+
+    /* Nothing is covered by a newer snapshot than the journal's own baseline. */
+    if (store->snapshot_sequence <= store->stream.baseline) {
+        return CV_OK;
+    }
+
+    cv_status status = write_compacted_journal(store);
+
+    if (status != CV_OK) {
+        return status;
+    }
+
+    /* Swap: close the old journal (Windows cannot rename over an open file), publish
+     * the new one atomically, then reattach to whichever file now has the name. */
+    cv_stream_clear(&store->stream);
+
+    status = fclose(store->journal) == 0 ? CV_OK : CV_ERR_IO;
+    store->journal = NULL;
+
+    if (status == CV_OK) {
+        status = cv_io_publish(store->temporary, store->journal_path, store->directory);
+    }
+
+    if (status != CV_OK) {
+        cv_io_remove(store->temporary);
+    }
+
+    cv_status attached = attach_journal(store);
+
+    /* Without a usable journal the handle cannot continue; reopening reconciles it. */
+    if (attached != CV_OK) {
+        store->failed = true;
+
+        return attached;
+    }
+
+    return status;
+}
+
 cv_status cv_persist_snapshot_start(cv_persist *store) {
     if (!store) {
         return CV_ERR_INVALID_ARGUMENT;
@@ -826,7 +1047,7 @@ cv_status cv_persist_snapshot_start(cv_persist *store) {
     cv_status status = store->clock(store->clock_context, &store->job_wall);
 
     if (status == CV_OK) {
-        status = temporary_path(store);
+        status = temporary_path(store, ".snapshot-");
     }
 
     if (status != CV_OK) {

@@ -29,7 +29,7 @@ import unittest
 
 # Protocol limits, mirroring include/cvault/config.h.
 MAX_LINE = 256 + 65536 + 32
-MAX_RESPONSE = 65536 + 128
+MAX_RESPONSE = 65536 + 1024
 
 # Command-line arguments, filled in by the ``__main__`` block below.
 ARGS = None
@@ -387,7 +387,8 @@ class NetworkTests(unittest.TestCase):
 
         for arguments in (["--version", "--port", "0"], ["--version", "--hash-password"],
                           ["--generate-key", "unused.key", "--port", "0"], ["--no-version"],
-                          ["--dump-audit", "unused.bin"], ["stray"]):
+                          ["--dump-audit", "unused.bin"], ["stray"],
+                          ["--expiry-sweep-ms", "0"], ["--expiry-sweep-ms", "x"]):
             result = subprocess.run([ARGS.server, *arguments], capture_output=True, timeout=5)
 
             self.assertEqual(result.returncode, 1, arguments)

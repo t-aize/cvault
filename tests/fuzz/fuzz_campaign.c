@@ -41,8 +41,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/** Maximum size of a mutated buffer. */
+/** Size of the working buffers of the small targets. */
 #define BUFFER_BYTES 4096
+
+/** Hard ceiling for any buffer handled by mutate() (the largest user needs about 64 KiB). */
+#define MAX_MUTATION_BYTES ((size_t)1 << 20)
 
 /** Failure helper: print the context, then make the calling function return false. */
 #define FAIL(...)                                                                                  \
@@ -74,6 +77,26 @@ static uint64_t random64(campaign *run) {
 /** @brief Uniform value in [0, bound). */
 static size_t below(campaign *run, size_t bound) {
     return bound ? (size_t)(random64(run) % bound) : 0;
+}
+
+/**
+ * @brief Open a gap of @p count bytes at @p position by moving the tail of the buffer up.
+ *
+ * Copies backwards, so it is a memmove() for overlapping ranges. It is written as a
+ * loop because GCC at -O3 cannot prove the size of the equivalent memmove() call and
+ * reports a false positive for it.
+ */
+static void open_gap(unsigned char *buffer, size_t length, size_t position, size_t count) {
+    for (size_t i = length; i > position; --i) {
+        buffer[i - 1 + count] = buffer[i - 1];
+    }
+}
+
+/** @brief Random insertion point in [0, length], explicitly clamped for the optimiser. */
+static size_t position_in(campaign *run, size_t length) {
+    size_t position = below(run, length + 1);
+
+    return position > length ? length : position;
 }
 
 /** Strings that tend to sit on grammar boundaries. */
@@ -112,6 +135,16 @@ static const char *const interesting[] = {
  */
 static size_t mutate(campaign *run, unsigned char *buffer, size_t length, size_t capacity) {
     unsigned int rounds = 1 + (unsigned int)below(run, 4);
+
+    /* Buffers here are small. Stating it lets the optimiser prove that no size
+     * computation below can wrap around. */
+    if (capacity > MAX_MUTATION_BYTES) {
+        capacity = MAX_MUTATION_BYTES;
+    }
+
+    if (length > capacity) {
+        length = capacity;
+    }
 
     for (unsigned int round = 0; round < rounds; ++round) {
         switch (below(run, 9)) {
@@ -154,9 +187,9 @@ static size_t mutate(campaign *run, unsigned char *buffer, size_t length, size_t
                 size_t count = 1 + below(run, 8);
 
                 if (length + count <= capacity) {
-                    size_t position = below(run, length + 1);
+                    size_t position = position_in(run, length);
 
-                    memmove(buffer + position + count, buffer + position, length - position);
+                    open_gap(buffer, length, position, count);
 
                     for (size_t i = 0; i < count; ++i) {
                         buffer[position + i] = (unsigned char)below(run, 256);
@@ -177,9 +210,9 @@ static size_t mutate(campaign *run, unsigned char *buffer, size_t length, size_t
                     }
 
                     if (length + count <= capacity) {
-                        size_t position = below(run, length + 1);
+                        size_t position = position_in(run, length);
 
-                        memmove(buffer + position + count, buffer + position, length - position);
+                        open_gap(buffer, length, position, count);
 
                         /* The source moved if the insertion point was before it. */
                         size_t source = position <= start ? start + count : start;
@@ -213,9 +246,9 @@ static size_t mutate(campaign *run, unsigned char *buffer, size_t length, size_t
                 size_t count = strlen(text);
 
                 if (length + count <= capacity) {
-                    size_t position = below(run, length + 1);
+                    size_t position = position_in(run, length);
 
-                    memmove(buffer + position + count, buffer + position, length - position);
+                    open_gap(buffer, length, position, count);
                     memcpy(buffer + position, text, count);
 
                     length += count;
@@ -413,6 +446,35 @@ typedef struct {
     uint64_t expiry;
 } written_record;
 
+/** Directory for scratch files, set once by main(). */
+static const char *scratch_directory = ".";
+
+/**
+ * @brief Create (or truncate) a scratch file and open it for reading and writing.
+ *
+ * tmpfile() is not used in the hot loops: on Windows it draws from a pool of about
+ * 32 000 names, which a long campaign exhausts.
+ */
+static FILE *open_scratch(const char *name) {
+    char *path = cv_io_path(scratch_directory, name);
+    FILE *file = path ? fopen(path, "w+b") : NULL;
+
+    free(path);
+
+    return file;
+}
+
+/** @brief Remove a scratch file created by open_scratch(). */
+static void remove_scratch(const char *name) {
+    char *path = cv_io_path(scratch_directory, name);
+
+    if (path) {
+        cv_io_remove(path);
+    }
+
+    free(path);
+}
+
 /** @brief Read a whole stdio file into @p buffer; returns its size. */
 static size_t slurp(FILE *file, unsigned char *buffer, size_t capacity) {
     if (fflush(file) != 0 || fseek(file, 0, SEEK_SET) != 0) {
@@ -443,10 +505,10 @@ static bool check_stream(const unsigned char *image,
                          const written_record *originals,
                          size_t count,
                          bool expect_all) {
-    FILE *file = tmpfile();
+    FILE *file = open_scratch("fuzz-codec-check.bin");
 
     if (!file) {
-        FAIL("tmpfile failed");
+        FAIL("cannot create a scratch file");
     }
 
     if (image_length && fwrite(image, 1, image_length, file) != image_length) {
@@ -572,10 +634,10 @@ static bool fuzz_codec(campaign *run) {
         written_record records[6];
         size_t ends[6];
         size_t count = 1 + below(run, 6);
-        FILE *file = tmpfile();
+        FILE *file = open_scratch("fuzz-codec-source.bin");
 
         if (!file) {
-            FAIL("tmpfile failed");
+            FAIL("cannot create a scratch file");
         }
 
         for (size_t k = 0; k < sizeof(key); ++k) {
@@ -673,6 +735,9 @@ static bool fuzz_codec(campaign *run) {
             FAIL("mutated stream broke the authentication guarantee (iteration %" PRIu64 ")", i);
         }
     }
+
+    remove_scratch("fuzz-codec-check.bin");
+    remove_scratch("fuzz-codec-source.bin");
 
     printf("  codec  : %" PRIu64 " streams, every mutation rejected or an exact prefix (%" PRIu64
            " cut inside the header)\n",
@@ -795,9 +860,10 @@ static bool is_quit(const unsigned char *line, size_t length) {
 /** @brief Compose a plausible request line for the pooled keys. */
 static size_t make_line(campaign *run, unsigned char *line, size_t capacity) {
     static const char *const commands[] = {
-        "SET", "GET", "DEL", "EXPIRE", "TTL", "PING", "SET", "GET"};
+        "SET", "GET", "DEL", "EXPIRE", "TTL", "PING", "SET", "GET", "EXPORT", "PURGE"};
     static const char *const keys[] = {
         "k:a", "k:b", "k:c", "k:d", "k:e", "other:x", "K:a", "shared:z"};
+    static const char *const prefixes[] = {"k:", "k", "k:a", "k:z", "o", "shared:", "K", "k:b"};
     static const char *const seconds[] = {"0", "-1", "100000", "5", "x"};
     const char *command = commands[below(run, sizeof(commands) / sizeof(commands[0]))];
     const char *key = keys[below(run, sizeof(keys) / sizeof(keys[0]))];
@@ -821,6 +887,19 @@ static size_t make_line(campaign *run, unsigned char *line, size_t capacity) {
                           seconds[below(run, sizeof(seconds) / sizeof(seconds[0]))]);
     } else if (strcmp(command, "PING") == 0) {
         length = snprintf((char *)line, capacity, "PING");
+    } else if (strcmp(command, "EXPORT") == 0) {
+        const char *prefix = prefixes[below(run, sizeof(prefixes) / sizeof(prefixes[0]))];
+
+        length = below(run, 3) == 0 ? snprintf((char *)line, capacity, "EXPORT %s %s", prefix, key)
+                                    : snprintf((char *)line, capacity, "EXPORT %s", prefix);
+    } else if (strcmp(command, "PURGE") == 0) {
+        /* Rarely, so that the pooled keys are not wiped out on every iteration. */
+        length = snprintf((char *)line,
+                          capacity,
+                          "PURGE %s",
+                          below(run, 4) == 0
+                              ? prefixes[below(run, sizeof(prefixes) / sizeof(prefixes[0]))]
+                              : "none:");
     } else {
         length = snprintf((char *)line, capacity, "%s %s", command, key);
     }
@@ -852,6 +931,162 @@ static bool reply_is(const unsigned char *reply, size_t length, const char *text
     return length == strlen(text) && memcmp(reply, text, length) == 0;
 }
 
+/** @brief True when pooled key @p index lies under the command's prefix. */
+static bool under_prefix(size_t index, const cv_command *command) {
+    return strncmp(pool[index], (const char *)command->key, command->key_length) == 0 &&
+           strlen(pool[index]) >= command->key_length;
+}
+
+/**
+ * @brief Validate an EXPORT reply: structure, order, permissions, values and completeness.
+ *
+ * The pooled keys are few and small, so a page is always complete (`+DONE`) and must
+ * contain every pooled key that is certainly present and lies under the prefix.
+ */
+static bool check_export(model_entry *model,
+                         const cv_command *command,
+                         const unsigned char *reply,
+                         size_t reply_length) {
+    size_t position = 0;
+    unsigned long count = 0;
+    char previous[CV_MAX_KEY_BYTES + 1] = {0};
+    bool seen[sizeof(pool) / sizeof(pool[0])] = {false};
+
+    if (reply_length < 3 || reply[0] != '*' || sscanf((const char *)reply, "*%lu\n", &count) != 1) {
+        FAIL("EXPORT reply does not start with a page header");
+    }
+
+    while (position < reply_length && reply[position] != '\n') {
+        ++position;
+    }
+
+    ++position;
+
+    for (unsigned long i = 0; i < count; ++i) {
+        char key[CV_MAX_KEY_BYTES + 1];
+        long long ttl;
+        size_t length;
+        int consumed = 0;
+
+        /* No "\n" in the format: whitespace directives would also swallow the spaces
+         * that may start the value. The header line is closed by hand instead. */
+        if (position >= reply_length ||
+            sscanf((const char *)reply + position,
+                   "=%256s %lld %zu%n",
+                   key,
+                   &ttl,
+                   &length,
+                   &consumed) != 3 ||
+            consumed == 0 || position + (size_t)consumed >= reply_length ||
+            reply[position + (size_t)consumed] != '\n') {
+            FAIL("EXPORT entry %lu is malformed", i);
+        }
+
+        position += (size_t)consumed + 1;
+
+        if (position + length + 1 > reply_length || reply[position + length] != '\n') {
+            FAIL("EXPORT entry %lu has a bad value frame", i);
+        }
+
+        if (strncmp(key, "k:", 2) != 0 ||
+            strncmp(key, (const char *)command->key, command->key_length) != 0) {
+            FAIL("EXPORT returned %s, outside the prefix or the permissions", key);
+        }
+
+        if (command->value_length &&
+            strncmp(key, (const char *)command->value, command->value_length) <= 0 &&
+            strcmp(key, "") != 0) {
+            char after[CV_MAX_KEY_BYTES + 1] = {0};
+
+            memcpy(after, command->value, command->value_length);
+
+            if (strcmp(key, after) <= 0) {
+                FAIL("EXPORT ignored the continuation key");
+            }
+        }
+
+        if (i > 0 && strcmp(previous, key) >= 0) {
+            FAIL("EXPORT entries are not strictly ascending");
+        }
+
+        if (ttl < -1) {
+            FAIL("EXPORT returned an impossible TTL");
+        }
+
+        for (size_t k = 0; k < sizeof(pool) / sizeof(pool[0]); ++k) {
+            if (strcmp(pool[k], key) != 0) {
+                continue;
+            }
+
+            seen[k] = true;
+
+            if (model[k].state == ABSENT) {
+                FAIL("EXPORT returned an absent key");
+            }
+
+            if (model[k].state == PRESENT &&
+                (model[k].length != length ||
+                 memcmp(model[k].value, reply + position, length) != 0)) {
+                FAIL("EXPORT returned the wrong value");
+            }
+        }
+
+        position += length + 1;
+
+        memcpy(previous, key, strlen(key) + 1);
+    }
+
+    if (!reply_is(reply + position, reply_length - position, "+DONE\n")) {
+        FAIL("EXPORT page is not terminated by +DONE");
+    }
+
+    for (size_t k = 0; k < sizeof(pool) / sizeof(pool[0]); ++k) {
+        bool after_ok = true;
+
+        if (command->value_length) {
+            char after[CV_MAX_KEY_BYTES + 1] = {0};
+
+            memcpy(after, command->value, command->value_length);
+
+            after_ok = strcmp(pool[k], after) > 0;
+        }
+
+        if (model[k].state == PRESENT && under_prefix(k, command) && after_ok && !seen[k]) {
+            FAIL("EXPORT omitted a key that is present");
+        }
+    }
+
+    return true;
+}
+
+/** @brief Validate a PURGE reply (`:<count>`, at most 100) and update the model. */
+static bool check_purge(model_entry *model,
+                        const cv_command *command,
+                        const unsigned char *reply,
+                        size_t reply_length) {
+    unsigned long count = 0;
+
+    if (reply_length < 3 || reply[0] != ':' || sscanf((const char *)reply, ":%lu\n", &count) != 1 ||
+        count > 100 || reply[reply_length - 1] != '\n') {
+        FAIL("PURGE reply is malformed");
+    }
+
+    /* Pooled keys under the prefix are gone, unless the batch limit may have stopped early. */
+    for (size_t k = 0; k < sizeof(pool) / sizeof(pool[0]); ++k) {
+        if (!under_prefix(k, command) || strncmp(pool[k], "k:", 2) != 0) {
+            continue;
+        }
+
+        if (model[k].state == PRESENT && count == 0) {
+            FAIL("PURGE removed nothing although a matching key is present");
+        }
+
+        model[k].state = count < 100 ? ABSENT : UNKNOWN;
+    }
+
+    return true;
+}
+
 /**
  * @brief Check one reply against the model and update the model.
  *
@@ -880,6 +1115,19 @@ static bool check_reply(model_entry *model,
         }
 
         return true;
+    }
+
+    if (command.type == CV_CMD_EXPORT || command.type == CV_CMD_PURGE) {
+        if (!authenticated) {
+            if (!reply_is(reply, reply_length, "-ERR access denied\n")) {
+                FAIL("anonymous EXPORT/PURGE was not denied");
+            }
+
+            return true;
+        }
+
+        return command.type == CV_CMD_EXPORT ? check_export(model, &command, reply, reply_length)
+                                             : check_purge(model, &command, reply, reply_length);
     }
 
     bool allowed = authenticated && command.key_length >= 2 && memcmp(command.key, "k:", 2) == 0;
@@ -1211,6 +1459,7 @@ int main(int argc, char **argv) {
     }
 
     run.rng = run.seed * UINT64_C(0x9e3779b97f4a7c15) | 1;
+    scratch_directory = run.scratch;
 
     printf("fuzz campaign: seed %" PRIu64 ", %" PRIu64 " iterations per target\n",
            run.seed,
