@@ -339,6 +339,13 @@ Command-line parsing uses [cofyc/argparse](https://github.com/cofyc/argparse) (M
 vendored in [`third_party/`](third_party/README.md) at commit `4e30aba` (2025-09-26),
 the latest upstream revision. Cryptography comes from libsodium (see above).
 
+## Contributing, conduct and security
+
+Because the project is finished, [contributions are not accepted](CONTRIBUTING.md)
+(forks are welcome), the [code of conduct](CODE_OF_CONDUCT.md) still applies wherever
+it is discussed, and the [security policy](SECURITY.md) explains why you should not
+protect real data with it and what a report can and cannot expect.
+
 ## License
 
 [MIT](LICENSE).
