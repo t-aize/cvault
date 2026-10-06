@@ -15,6 +15,31 @@ cvault_copy_runtime(cvault-test-core)
 
 add_test(NAME core_smoke COMMAND cvault-test-core)
 
+# Parser validation: explicit grammar table, exhaustive mutations and a random sweep,
+# all compared with an independent reference implementation.
+add_executable(cvault-test-parser test_parser.c parser_reference.c)
+target_link_libraries(cvault-test-parser PRIVATE cvault_core cvault_options)
+cvault_copy_runtime(cvault-test-parser)
+
+add_test(NAME parser COMMAND cvault-test-parser)
+set_tests_properties(parser PROPERTIES TIMEOUT 60)
+
+# Portable fuzzing campaign (parser, record codec, policy loader, whole service) with
+# oracles. A short run is part of the suite; longer runs use --iterations (see
+# docs/fuzzing.md). Scratch files go to the build directory.
+add_executable(cvault-fuzz-campaign
+    fuzz/fuzz_campaign.c
+    parser_reference.c)
+target_include_directories(cvault-fuzz-campaign PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(cvault-fuzz-campaign PRIVATE cvault_core cvault_options)
+cvault_copy_runtime(cvault-fuzz-campaign)
+
+add_test(NAME fuzz_campaign
+    COMMAND cvault-fuzz-campaign --iterations 20000 --seed 1
+        --corpus "${PROJECT_SOURCE_DIR}/tests/fuzz/corpus"
+        --scratch "${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(fuzz_campaign PROPERTIES TIMEOUT 300)
+
 # Hash table functional tests.
 add_executable(cvault-test-hashtable test_hashtable.c)
 target_link_libraries(cvault-test-hashtable PRIVATE cvault_core cvault_options)

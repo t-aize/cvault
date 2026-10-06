@@ -58,8 +58,9 @@ if(CVAULT_ENABLE_SANITIZERS)
             "Use a Linux/WSL toolchain.")
     endif()
 
+    # Undefined behaviour must fail the test, not just print a diagnostic and go on.
     target_compile_options(cvault_options INTERFACE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
+        -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
     target_link_options(cvault_options INTERFACE -fsanitize=address,undefined)
 endif()
 
