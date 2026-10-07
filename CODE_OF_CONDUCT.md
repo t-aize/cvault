@@ -1,6 +1,6 @@
 # Code of conduct
 
-cvault is a finished learning project (see the [README](README.md)), so there is no
+cvault is a feature-frozen learning project (see the [README](README.md)), so there is no
 active community to manage. This short code still applies wherever the project is
 discussed: its issues, pull requests, discussions and any other space that uses its
 name.

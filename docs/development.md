@@ -277,11 +277,13 @@ in the documentation together, then rebuild Debug and Release and run CTest.
 ## Code organization and CI
 
 Public interfaces live in `include/cvault/`; `cvault_core` groups the modules.
-Scaffold functions return `CV_ERR_NOT_IMPLEMENTED`, authorization denies access
-by default, and sensitive buffers should be wiped before freeing. Register new
-tests in `tests/CMakeLists.txt`. Use `CHECK` for checks that must stay active in
-Release builds. Current tests cover the core, TCP transport, encrypted persistence
-security and dependency integration; see their dedicated guides.
+Features a platform cannot provide return `CV_ERR_NOT_IMPLEMENTED`, authorization
+denies access by default, and sensitive buffers should be wiped before freeing.
+Register new tests in `tests/CMakeLists.txt`. Use `CHECK` for checks that must stay
+active in Release builds. Current tests cover the core, the parser, TCP transport,
+encrypted persistence, security (including rotation and policy reload), the
+command-line client and dependency integration; see their dedicated guides. The
+client has its own end-to-end suite, `tests/test_cli.py`, which starts a real server.
 
 The workflow defines six Linux combinations (GCC/Clang x Debug/Release/ASan), plus
 four Windows combinations (GCC/MSVC x Debug/Release) and six macOS combinations

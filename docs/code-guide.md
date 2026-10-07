@@ -9,22 +9,25 @@ and [security](security.md) describe runtime behavior and deployment.
 
 | Files | Responsibility |
 |---|---|
-| `main.c` | Option parsing (argparse) and validation, provisioning commands, startup, event loop, snapshot scheduling and shutdown |
+| `main.c` | Option parsing (argparse) and validation, provisioning and rotation commands, startup, event loop, snapshot scheduling, policy reload and audit rotation scheduling, and shutdown |
 | `server.c` | Socket ownership, bounded framing, backpressure, poll/epoll readiness and deadlines |
 | `parser.c` | Allocation-free grammar, bounded borrowed slices and signed integer validation |
-| `security_service.c` | Per-connection sessions, AUTH throttling, ACL-before-storage dispatch (including per-entry filtering for EXPORT and PURGE) and fail-closed audit ordering |
+| `security_service.c` | Per-connection sessions, AUTH throttling, ACL-before-storage dispatch (including per-entry filtering for EXPORT and PURGE), fail-closed audit ordering, policy reload with session revocation and audit rotation triggering |
 | `auth.c` | Immutable credential policy, bounded PHC profiles and independent prefix grants |
-| `audit.c` | Private encrypted event stream, schema validation, synchronization and verified JSON export |
+| `audit.c` | Private encrypted event stream, schema validation, synchronization, verified JSON export and crash-safe rotation (staging file, archive name, swap) |
 | `hashtable.c` | Owned key/value memory, keyed hashing, collision chains, resizing and expiration |
-| `persist.c` | Durable mutations, recovery, wall/monotonic deadline conversion, snapshot lifecycle, journal compaction and the expiry sweep |
+| `persist.c` | Durable mutations, recovery, wall/monotonic deadline conversion, snapshot lifecycle, journal compaction, the expiry sweep and offline key rotation |
 | `persist_codec.c` | Versioned byte layout, little-endian encoding, AEAD and authenticated chaining |
-| `persist_io.c` | Private files/locks, platform permissions, synchronization and atomic publication |
+| `persist_io.c` | Private files/locks, platform permissions, synchronization, atomic publication, renames, file stamps and removal of flat directories |
+| `secret_input.c` | Echo-free reading of one secret line from stdin, shared by `--hash-password` and the client |
+| `client/main.c` | `cvault-cli`: sockets, reply rendering, EXPORT paging, reconnection and password handling |
 | `crypto.c`, `common.c`, `config.c` | Shared crypto initialization/wiping, status strings and defaults |
 
 `third_party/argparse` is vendored upstream code (see its README) and is never reformatted.
 Private headers in `src/` support implementation collaboration; callers should use
-the contracts in `include/cvault/`. The CLI client remains a guarded scaffold.
-Test fixtures are separate executables: production servers expose no fault-injection
+the contracts in `include/cvault/`. The client (`client/main.c`) is a single file:
+it owns its socket layer and protocol reading, and reuses only the secret reader and
+the private-file layer of the core library. Test fixtures are separate executables: production servers expose no fault-injection
 or test-only commands.
 
 ## Readability conventions
@@ -129,6 +132,16 @@ until mutation/destruction. Durable mutations prepare a clone, synchronize their
 record, then publish the prepared state. Allocation failure therefore leaves the
 old state intact. An I/O failure can leave an unacknowledged committed record after
 recovery; tests and callers must account for that ambiguity.
+
+Two kinds of file replacement are crash-safe by construction and share a pattern:
+write the complete new state next to the old one and synchronise it, make the swap
+with renames whose intermediate states are recognised at the next open, and never
+overwrite a name that exists. The audit rotation (`<audit>.next`, then the archive
+rename, then the swap) and the data key rotation (`<data>.rekey`, then
+`<data>.rekey-old`) both follow it; their open paths finish or discard a swap that
+a crash interrupted. A policy reload is simpler because nothing is persisted: the
+new policy is loaded completely before the old one is destroyed, and every session
+that borrowed the old one is cleared first.
 
 The storage/audit streams are independent, not a cross-file transaction. Intent
 failure must prevent storage execution. Result failure can follow a committed

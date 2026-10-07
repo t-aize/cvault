@@ -3,8 +3,9 @@
 ## Do not use cvault to protect real data
 
 cvault is a **learning project**. It has never been audited by a third party, it
-carries no security or compliance certification, and it is **finished: it will not
-receive security fixes or any other update**. Use it to study how such a system can be
+carries no security or compliance certification, and it is **feature-frozen: no
+further development is planned, and security fixes are not promised**. Use it to
+study how such a system can be
 built, not to hold secrets you care about. For real needs, use a mature, maintained
 product.
 
@@ -27,7 +28,8 @@ You may still report what you find; it can be valuable to other learners.
 Please understand what to expect:
 
 - **No guaranteed answer, no timeline and no fix.** The maintainer does not monitor
-  reports and has no obligation to respond.
+  reports and has no obligation to respond. The Supported versions table above is
+  literal: nothing here has a patch policy.
 - A confirmed finding may be recorded in the documentation (for example in the
   limitations of [docs/security.md](docs/security.md)) instead of being fixed.
 - You are free to publish your findings. Coordinated disclosure is appreciated but not
@@ -52,7 +54,8 @@ These are known limits, documented in [docs/security.md](docs/security.md) and
 [docs/persistence.md](docs/persistence.md):
 
 - there is **no TLS**: traffic on the network is not encrypted, so keep the server on
-  loopback or behind an authenticated encrypted tunnel;
+  loopback or behind an authenticated encrypted tunnel (an SSH tunnel recipe is in
+  [docs/security.md](docs/security.md#encrypting-the-connection));
 - a compromised host, access to process memory, swap or core dumps, and physical
   attacks on the machine;
 - denial of service beyond the documented bounds (connection cap, frame limits,
@@ -60,7 +63,8 @@ These are known limits, documented in [docs/security.md](docs/security.md) and
 - physical erasure on SSDs, backups and file system snapshots, even after compaction;
 - removal of a complete suffix or whole-file rollback of the audit log without an
   external trusted anchor;
-- the absence of key rotation, online policy reload and audit rotation;
+- the absence of automatic audit retention and of remote audit anchoring (rotation,
+  key rotation and policy reload exist; see the security and persistence guides);
 - weaknesses of third-party code that are not specific to how cvault uses it
   (libsodium, vendored argparse): report those upstream.
 
@@ -71,4 +75,6 @@ an independent reference implementation, a deterministic fuzzing campaign attack
 parser, the encrypted record codec, the policy loader and the whole service,
 sanitizer builds abort on undefined behaviour, and injected bugs are shown to be
 detected. The results and their limits are written down in
-[docs/fuzzing.md](docs/fuzzing.md). This is evidence, not proof of security.
+[docs/fuzzing.md](docs/fuzzing.md). This is evidence, not proof of security: the
+weekly CI fuzzing job has not run on GitHub so far, no multi-day AFL++ campaign has
+been run, and nobody but the author has reviewed the code.

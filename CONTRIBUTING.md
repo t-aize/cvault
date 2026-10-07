@@ -2,11 +2,11 @@
 
 ## Status of this project
 
-cvault is a **finished learning project**. It was written to study low-level C,
-networking, applied cryptography and secure design, and it is kept as a complete,
-documented snapshot. It will receive **no further updates, bug fixes, dependency
-updates, new features or support** (see the notice at the top of the
-[README](README.md)).
+cvault is a **feature-frozen learning project**. It was written to study low-level
+C, networking, applied cryptography and secure design, and it is kept as a
+documented snapshot. **No further development is planned**: expect no new features,
+bug fixes, dependency updates or support (see the notice at the top of the
+[README](README.md), which also lists what has and has not been verified).
 
 For that reason **contributions are not being accepted**:
 

@@ -3,22 +3,26 @@
 A small **encrypted key-value store written in C**, designed to be accessible over TCP.
 Think "mini Redis", with security and data protection as the main goal.
 
-> **Learning project: finished, and no further updates are planned.**
-> cvault was written to learn low-level C, networking, applied cryptography and
-> secure design. It is **not production software**, it has never been audited, and it
-> makes no security or compliance claim. The repository is kept as a complete,
-> documented snapshot for study: **there will be no new features, bug fixes,
-> dependency updates or support**, and issues or pull requests may go unanswered.
+> **Learning project, feature-frozen.** cvault was written to learn low-level C,
+> networking, applied cryptography and secure design. It is **not production
+> software**, it has never been audited, and it makes no security or compliance
+> claim. The feature set below is complete for that purpose and **no further
+> development is planned**: expect no new features, no dependency updates and no
+> support, and issues or pull requests may go unanswered. "Feature-frozen" does not
+> mean "verified": see [what is and is not verified](#testing-and-known-limitations).
 > You are welcome to read it, learn from it and fork it (MIT license).
 >
 > What it does: an authenticated, encrypted key-value server over TCP with SET, GET,
 > DEL, EXPIRE, TTL, prefix-scoped EXPORT and PURGE, literal prefix read/write
-> permissions, Argon2id logins, a tamper-evident audit log, an encrypted journal and
-> snapshots with optional compaction, and an automatic expiry sweep. Journal
-> recovery and background snapshots use POSIX fork or a Windows immutable-copy
-> worker. The interactive CLI client is only a scaffold. Configure security
-> explicitly; the default handler exposes only PING/QUIT. Code, documentation, tests
-> and CI are in English.
+> permissions, Argon2id logins, a tamper-evident audit log with rotation, an
+> encrypted journal and snapshots with optional compaction, an automatic expiry
+> sweep, offline rotation of the storage and audit keys, and online policy reload.
+> `cvault-cli` is an interactive and scriptable client. Journal recovery and
+> background snapshots use POSIX fork or a Windows immutable-copy worker. Configure
+> security explicitly; the default handler exposes only PING/QUIT. There is no TLS:
+> keep the server on loopback or behind an encrypted tunnel (see
+> [security](docs/security.md#encrypting-the-connection)). Code, documentation,
+> tests and CI are in English.
 
 ## Why this project?
 
@@ -149,12 +153,28 @@ the commands and folders for every system side by side.
 Send `PING\n` to receive `+PONG\n`, or `QUIT\n` to receive `+OK\n` followed by closure.
 Enable authenticated storage with `--security`, `--audit` and `--audit-key-file`.
 See [security setup and protocol](docs/security.md) for account provisioning, prefix
-permissions, examples and audit export. Without security configuration, storage
-commands remain rejected.
+permissions, examples, audit export, audit rotation and policy reload. Without
+security configuration, storage commands remain rejected.
 See the [TCP transport guide](docs/network.md) for options, embedding and tests.
-See [encrypted persistence](docs/persistence.md) for `--data`, key provisioning,
-startup replay, durability, snapshot backends, compaction and the durable C API.
-The interactive CLI client is a scaffold only.
+See [encrypted persistence](docs/persistence.md) for `--data`, key provisioning and
+rotation, startup replay, durability, snapshot backends, compaction and the durable
+C API.
+
+### The client
+
+`cvault-cli` runs one command from its arguments, an interactive prompt on a
+terminal, or one command per line from stdin. Passwords come from a private file or
+a hidden prompt, never from the command line:
+
+```sh
+cvault-cli --user alice --password-file alice.pw SET alice:note "hello world"
+cvault-cli --user alice --password-file alice.pw GET alice:note
+cvault-cli --user alice --password-file alice.pw EXPORT alice:
+cvault-cli --user alice          # hidden password prompt, then an interactive prompt
+```
+
+On Windows use `cvault-cli.exe`. The exit status is 0 on success and 1 on any error;
+see [the client guide](docs/security.md#the-command-line-client).
 
 ## Features
 
@@ -172,6 +192,10 @@ The interactive CLI client is a scaffold only.
 | Security | `AUTH` with Argon2id password verification | ✅ |
 | Security | Per-prefix read/write access control | ✅ |
 | Security | Audit log of sensitive operations | ✅ |
+| Security | Audit log rotation (online and offline) with continuous sequence numbers | ✅ |
+| Security | Online policy reload (SIGHUP or file watch), revoking all sessions | ✅ |
+| Security | Offline rotation of the storage key and of the audit key | ✅ |
+| Client | `cvault-cli`: interactive, scriptable, EXPORT paging, reconnection | ✅ |
 | Robustness | Full parser validation (independent reference), fuzzing campaign, sanitizer runs | ✅ |
 | Data protection | Journal compaction (`--compact`) | ✅ |
 | Data protection | Automatic expiry sweep (`--expiry-sweep-ms`) | ✅ |
@@ -212,8 +236,9 @@ cvault/
 ├── src/              # Server entry point and module implementations
 │   ├── main.c / server.c / config.c / common.c
 │   ├── parser.c / hashtable.c / crypto.c / auth.c
-│   └── persist.c / persist_codec.c / persist_io.c / audit.c / security_service.c
-├── client/main.c     # CLI entry point
+│   ├── persist.c / persist_codec.c / persist_io.c / audit.c / security_service.c
+│   └── secret_input.c
+├── client/main.c     # cvault-cli
 ├── tests/            # Core, parser (reference oracle), network, persistence, security tests + fuzzing
 ├── scripts/          # Local Windows/CLion, Linux and macOS setup
 ├── docs/             # Core, network, persistence, development and security guides
@@ -258,13 +283,15 @@ semantics.
 The intended design protects against disk inspection, unauthenticated clients,
 malformed input and password-comparison timing attacks. It does not protect
 against process-memory inspection, a compromised host or network eavesdropping
-(TLS is not implemented and will not be). Bind to localhost by default.
+(there is no TLS and none is planned: use loopback or an encrypted tunnel). Bind to
+localhost by default.
 
 All cryptographic primitives come from [libsodium](https://doc.libsodium.org/).
 Its [official Windows installation guide](https://doc.libsodium.org/installation)
 documents the prebuilt MinGW libraries used by the bootstrap script.
 The journal, snapshots and audit stream use authenticated encryption. Argon2id
-authentication and prefix ACLs are implemented; key rotation and TLS are not. See
+authentication and prefix ACLs, key rotation, audit rotation and policy reload are
+implemented; TLS is not. See
 [persistence guarantees and limits](docs/persistence.md). See
 [security notes](docs/security.md) for provisioning, guarantees and limits.
 
@@ -286,7 +313,7 @@ These are educational mechanisms, not a claim of GDPR compliance.
 Current tests cover the hash table's binary values, ownership, input bounds,
 collisions, resizing, expiration, clock failures and allocation rollback. A private
 test build forces collisions and checks that key/value allocations are wiped before
-freeing. Other tests check module linkage, safe scaffold behavior, parser input bounds,
+freeing. Other tests check module linkage, parser input bounds,
 libsodium initialization, an XChaCha20-Poly1305 dependency roundtrip and tamper rejection.
 Checks remain enabled in Release builds.
 
@@ -325,13 +352,28 @@ Private synchronization faults prove that failed audit intents prevent mutations
 and failed audit results stop further work. Compaction, the expiry sweep, EXPORT and
 PURGE have their own unit, crash-window, fault-injection and end-to-end tests.
 
-Not implemented, and not planned (the project is finished):
+Added late, and covered by end-to-end tests that start the real executables: the
+client (`tests/test_cli.py`, including a pseudo-terminal check that the password is
+never echoed), audit rotation (sequence continuity, archives, interrupted
+rotations), policy reload (timer and SIGHUP, revoked sessions, rejected files) and
+key rotation (re-encryption, failures that change nothing, interrupted swaps).
 
-1. An interactive CLI client (only a scaffold exists).
-2. TLS, key rotation and online policy reload.
-3. Audit retention, rotation and remote sequence anchoring.
-4. Storage quotas, benchmarks, Valgrind runs and power-loss testing.
-5. Multi-day AFL++ campaigns on dedicated hardware.
+What has **not** been verified, so that "feature-frozen" is not read as "proven":
+
+- The weekly fuzzing job (`.github/workflows/ci.yml`, `fuzz`) has not run on GitHub
+  so far; the campaign has only been run locally.
+- No multi-day AFL++ campaign on dedicated hardware has been run.
+- The project has never been audited by anyone but its author.
+- Power-loss behaviour was reasoned about and fault-injected, never tested on real
+  hardware, and physical erasure on SSDs and backups cannot be promised.
+
+Not implemented, and not planned:
+
+1. TLS (see [Encrypting the connection](docs/security.md#encrypting-the-connection)).
+2. Automatic audit retention and remote sequence anchoring: archives are kept
+   until the operator removes them, and deleting a whole archive is only detectable
+   through the gap in the sequence numbers.
+3. Storage quotas, benchmarks and Valgrind runs.
 
 ## Third-party code
 
@@ -341,7 +383,7 @@ the latest upstream revision. Cryptography comes from libsodium (see above).
 
 ## Contributing, conduct and security
 
-Because the project is finished, [contributions are not accepted](CONTRIBUTING.md)
+Because the project is feature-frozen, [contributions are not accepted](CONTRIBUTING.md)
 (forks are welcome), the [code of conduct](CODE_OF_CONDUCT.md) still applies wherever
 it is discussed, and the [security policy](SECURITY.md) explains why you should not
 protect real data with it and what a report can and cannot expect.

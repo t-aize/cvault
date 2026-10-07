@@ -141,7 +141,7 @@ const cv_hashtable *cv_persist_table(const cv_persist *store);
 /**
  * @brief Write an atomic snapshot and wait for it.
  *
- * The journal is retained; compaction is not implemented yet.
+ * The journal is retained; cv_persist_compact() drops the records it makes redundant.
  */
 cv_status cv_persist_snapshot(cv_persist *store);
 

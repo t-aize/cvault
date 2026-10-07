@@ -9,6 +9,13 @@ the policy loader or the security service misbehave:
    on demand and weekly in CI): runs on every platform and under every sanitizer.
 3. **AFL++** (coverage guided, Linux and macOS): described at the end of this page.
 
+What has and has not been run: the campaign has been run locally, and its short run
+is part of the test suite. The weekly CI job has not run on GitHub so far, and no
+multi-day AFL++ campaign has been run. The campaign covers the parser, the record
+codec, the policy loader and the request pipeline; the rotation and reload paths
+added later (audit rotation, key rotation, policy reload) are covered by the
+end-to-end tests of their own, not by the fuzzer.
+
 Sanitizer builds (`asan` preset on Linux and macOS) enable AddressSanitizer and
 UBSan with `-fno-sanitize-recover=undefined`, so undefined behaviour aborts the test
 instead of only printing a diagnostic.

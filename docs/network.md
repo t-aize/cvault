@@ -219,7 +219,8 @@ configured release toolchain. CI continues to require stable GCC 16.2.0 or Clang
 The server remains a learning project, with a hard cap of 1,024 clients, fixed
 buffers and a single owner thread. Slot scanning makes each iteration O(max_clients)
 even with epoll; this is not an unbounded high-scale server. There is no TLS,
-DNS binding, Unix socket backend or interactive CLI, and none is planned. The
+DNS binding or Unix socket backend, and none is planned (the `cvault-cli` client
+resolves names itself). The
 configured security layer supplies AUTH, prefix-controlled storage and an
 authentication rate gate. Keep loopback binding or use an authenticated encrypted
 tunnel. The expiry sweep and snapshot scheduling run in the server's main loop,

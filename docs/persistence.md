@@ -235,11 +235,56 @@ are weaker. Storage hardware, caches and filesystem implementation must honor th
 requested operations. See [fsync](https://man7.org/linux/man-pages/man2/fsync.2.html)
 and [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
 
+## Rotating the encryption key
+
+Replace the key of a data directory when it may have leaked or on a schedule. The
+server must be stopped, because the directory is locked while a store is open:
+
+```sh
+cvault-server --generate-key runtime/store2.key
+cvault-server --rotate-data-key runtime/data \
+  --key-file runtime/store.key --new-key-file runtime/store2.key
+cvault-server --data runtime/data --key-file runtime/store2.key ...   # start with the new key
+```
+
+On Windows run the same commands with `cvault-server.exe`. The command opens the
+store with the old key, which authenticates the complete old history, and writes the
+live state as one snapshot plus an empty journal under the new key into a sibling
+directory `runtime/data.rekey`. It then reopens that copy with the new key and checks
+that every live entry of the original is present and identical, and only then swaps:
+`runtime/data` is renamed to `runtime/data.rekey-old`, `runtime/data.rekey` becomes
+`runtime/data`, and the old directory is deleted. Nothing encrypted under the old key
+remains in the file system afterwards (SSDs, backups and file system snapshots may
+still hold old blocks; see the limits under compaction).
+
+The rotated store is a new dataset: it has a fresh identity, its sequence numbers
+start again at zero, expired entries are gone and the journal history is not carried
+over (so a rotation is also a compaction). Remaining time to live is preserved.
+
+Failure behaviour:
+
+- A wrong old key, a missing directory, equal keys or a directory in use are refused
+  before anything is written; a missing directory is never created by a rotation.
+- A failure or crash before the swap leaves the original untouched. A failed run
+  removes its staging directory itself; after a crash a stale `<data>.rekey` remains
+  and must be deleted by hand before the next attempt, which refuses to overwrite
+  any leftover `<data>.rekey` or `<data>.rekey-old`.
+- A crash between the two renames leaves no `<data>` directory, but a complete,
+  verified `<data>.rekey` and the old `<data>.rekey-old`. The next start (any
+  `cv_persist_open()`) recognises exactly that state, moves the copy into place and
+  deletes the old directory, instead of silently starting an empty store. Open it
+  with the *new* key.
+- If only deleting the old directory fails, the rotation itself succeeded and the
+  command reports an error: delete `<data>.rekey-old` by hand.
+
+The key of the audit log is rotated separately, together with a log rotation; see
+[audit rotation](security.md#audit-rotation).
+
 ## Binary format v1
 
 All integers are little-endian; there are no native structure dumps. Version changes
 require a new magic and explicit migration support. The current format has no
-password-derived keys or automatic key rotation.
+password-derived keys; keys are rotated by an explicit offline command (see above).
 
 | File header offset | Bytes | Field |
 |---|---:|---|

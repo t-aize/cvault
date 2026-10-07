@@ -135,10 +135,37 @@ apply the same grants to every entry they touch: EXPORT only returns entries the
 session may read, PURGE only erases entries it may write (see
 [Export, erasure and expiry](#export-erasure-and-expiry)).
 
-Policies are immutable for the server lifetime. Stop, edit hashes/grants, then
-restart to rotate credentials or permissions. Restart revokes all sessions. Audit
-and persistence keys require an explicit offline migration to rotate; no automatic
-key rotation is implemented.
+### Changing the policy while the server runs
+
+A loaded policy is immutable; changing credentials or permissions means loading a
+new one. A restart always works and revokes every session. To avoid the downtime
+the running server can reload the file:
+
+- **`SIGHUP`** (Linux and macOS) reloads the policy at once, even if the file did
+  not change. It works whenever `--security` is set.
+- **`--policy-reload-ms <ms>`** (all platforms) checks the file's modification time,
+  size and identity this often and reloads when one changed. The default is off.
+
+Replace the file atomically (write a new file next to it and rename it over the old
+one, as `mv` and most editors do): a reload that happens to read a half-written
+file is rejected, harmlessly, but needlessly noisy.
+
+A reload is all or nothing. A valid file replaces the policy and **revokes every
+session**: sessions borrow the policy that authenticated them, so no privilege may
+outlive it. Clients receive `-ERR access denied` until they send `AUTH` again, and
+then get exactly the grants of the new file. A user who was removed can no longer
+log in; a user who lost a grant loses it at once. The per-connection failure
+counters are kept, so a reload does not hand out fresh `AUTH` attempts. A file that
+cannot be loaded changes nothing: the server keeps the previous policy, prints a
+warning, and does not try the same file again until it changes.
+
+Every reload attempt is an audit event: operation `RELOAD`, phase `result`, identity
+`server`, and the status of the load (`0` applied, otherwise the rejection reason).
+If that event cannot be written the service stops, like any audit failure.
+
+Credentials of the *audit* and *storage* keys are not part of the policy. Rotate
+them with the offline commands described in [audit rotation](#audit-rotation) and in
+[persistence](persistence.md#rotating-the-encryption-key).
 
 ## Wire protocol
 
@@ -197,6 +224,61 @@ not a general network/audit requests-per-second limit. Verification is synchrono
 on the single owner thread and can briefly delay all clients. Only one 64 MiB
 verification executes at a time. There is no authentication worker thread, keeping
 POSIX fork snapshots compatible with the single-threaded process requirement.
+
+## The command-line client
+
+`cvault-cli` speaks this protocol. It connects over TCP (IPv4 or IPv6), optionally
+authenticates, and runs commands in one of three ways:
+
+```sh
+cvault-cli --user alice --password-file runtime/alice.pw SET alice:note "hello world"
+cvault-cli --user alice --password-file runtime/alice.pw GET alice:note
+printf 'GET alice:a\nGET alice:b\n' | cvault-cli --user alice --password-file runtime/alice.pw
+cvault-cli --user alice          # prompts for the password, then an interactive prompt
+```
+
+The same commands work on Windows with `cvault-cli.exe` from the build directory.
+
+| Option | Meaning |
+|---|---|
+| `--host`, `--port` | Server address (default `127.0.0.1:6380`); a host name is resolved. |
+| `--user` | Authenticate as this user right after connecting. |
+| `--password-file` | Private file whose first line is the password. Without it the password is read from stdin: with a hidden prompt on a terminal, or as the first line of a pipe. |
+| `--timeout-ms` | Longest wait for connecting, sending or receiving (default 10000). |
+
+Passwords are never accepted on the command line, where they would show up in the
+process list and the shell history. On Linux and macOS the password file must be
+owned by the caller and closed to group and others, like the server's own files. A
+value given as a command argument is visible in the process list as well; send
+sensitive values through stdin.
+
+With command words after the options, the client runs that one command and exits.
+Without them it reads one command per line from stdin: on a terminal it shows a
+`cvault>` prompt (with `help` and `exit`), otherwise it runs silently, which makes it
+scriptable. The command word is upper-cased for you; keys and values are sent as
+typed. Replies are printed for people and scripts alike:
+
+| Server reply | Output |
+|---|---|
+| `+OK` / `+PONG` | `OK` / `PONG` |
+| `$<n>` value | the value, verbatim, followed by a newline |
+| `$-1` | `(nil)` |
+| `:<n>` | the number (TTL, PURGE count) |
+| EXPORT pages | one line per entry: `key<TAB>ttl<TAB>value`; pages are followed automatically until `+DONE` |
+| `-ERR ...` | `(error) ERR ...` on stderr |
+
+The exit status is 0 when every command succeeded and 1 when the server answered
+with an error, the connection failed, or an option was invalid.
+
+The server closes idle connections (`--idle-timeout-ms`) and after three failed
+logins. Before each command the client checks the connection; if the server hung up
+it reconnects and authenticates again (printing `(reconnected)` on stderr). A
+command that was already sent is never repeated, because its outcome would be
+unknown: if the connection breaks while waiting for a reply the client reports the
+failure and the next command starts on a fresh connection. Because the server
+verifies at most four passwords per second across all clients, and answers a
+throttled attempt like a wrong password, the client retries `AUTH` once after
+300 ms.
 
 ## Export, erasure and expiry
 
@@ -257,8 +339,8 @@ unreadable, and it writes nothing to the journal.
 ## Audit guarantees and reading events
 
 The audit stream records START/STOP, authentication attempts/results, authorized
-storage intents/results (including EXPORT and PURGE), permission refusals and
-malformed/unsupported commands.
+storage intents/results (including EXPORT and PURGE), permission refusals,
+malformed/unsupported commands, policy reloads (RELOAD) and log rotations (ROTATE).
 PING/QUIT, transport-level malformed frames and disconnects are not sensitive
 operation events. Failed authentication records use `anonymous`; untrusted candidate
 usernames are never logged. Successful/authenticated operations use the validated
@@ -318,16 +400,56 @@ Preserve damaged files and investigate or restore a verified backup before resta
 A previously failed synchronization can leave a complete event on disk; startup
 accepts it if the full chain authenticates. Forced termination cannot write STOP.
 
-There is no automatic rotation, compaction, remote anchor or retention scheduler
-for the audit file (compaction applies to the storage journal only).
 Startup/export scan the complete audit stream in O(file size), with fixed codec
-buffers and no event accumulation. Plan disk capacity and retention. For offline
-rotation, stop the server, archive the audit file together with a secure backup of
-its key, then start with a new audit path. Retain old files for investigations.
+buffers and no event accumulation, which is what rotation keeps bounded.
 Authenticated chaining detects edits and reordering, but cannot detect removal of
 a complete suffix, replacement by an older authentic file, or deletion of the whole
 file without an external trusted sequence anchor. Keep independently protected
 backups if rollback evidence matters.
+
+### Audit rotation
+
+Rotation seals the current log and continues it in a new file, so no single file
+grows without bound and an old file can be archived, backed up or handed to an
+investigator on its own.
+
+- **Online:** `--audit-max-bytes <n>` makes the running server rotate as soon as the
+  log reaches `n` bytes. The check runs between event-loop steps, never inside a
+  request, so the intent and the result of one request always end up in the same
+  file. A file can exceed `n` by the events of the requests handled in one step.
+- **Offline:** with the server stopped,
+  `cvault-server --rotate-audit runtime/audit.bin --audit-key-file runtime/audit.key`
+  does the same on demand. Adding `--new-audit-key-file <file>` encrypts the *new*
+  file under another key: this is the audit key rotation, because the sealed file
+  stays readable with the old key and the continuation only with the new one. Start
+  the server with the new `--audit-key-file` afterwards.
+
+What happens, in order: an event `ROTATE` / `intent` becomes the last record of the
+old file; a new file is written next to it (`<audit>.next`) with a fresh identity, a
+header that continues the sequence numbering and a `ROTATE` / `result` event as its
+first record, and is synchronised; the old file is renamed to `<audit>.<N>` where
+`N` is its last sequence number in 20 digits; the new file is renamed to the audit
+path. A name that already exists is never overwritten: the rotation is refused before
+anything is written. Read an archive with `--dump-audit <archive> --audit-key-file
+<the key it was written under>`. The sequence numbers of the archives and of the
+active file together run `1..N` without a gap; `ROTATE` events mark every seam.
+
+A crash at any point leaves a log that opens: before the first rename the old file is
+intact and a stale `<audit>.next` is deleted at the next start; between the two
+renames the audit path is missing, and the next start moves the complete
+`<audit>.next` into place (if that rotation changed the key, start with the new
+key). A rotation that fails without touching the old file (for example a full disk)
+is reported once and not retried for the rest of the run, so the log is not flooded
+with intent events; the server keeps serving and the log keeps growing. A failure
+after the old file was renamed stops the server like any audit failure.
+
+There is no cryptographic link between a sealed file and its successor: removing
+a *whole archive* is only noticeable by the gap in the sequence numbers, and
+removing the newest archive together with the active file is not noticeable at all
+without an external anchor. There is also no retention scheduler: archives are never
+deleted. Moving them to protected storage and deciding how long to keep them is the
+operator's job, because deleting evidence automatically would defeat the point of
+the log.
 
 ## C API, ownership and tests
 
@@ -348,18 +470,43 @@ locks and injected synchronization failures before/after mutations. EXPORT is
 tested for per-grant filtering, ordering, TTLs, binary-safe values, anonymous
 refusal, expired entries and pagination over more than 300 KB including a
 maximum-size value; PURGE for grant filtering, the 100-key batches and durability
-across a restart, with their audit events. POSIX additionally
+across a restart, with their audit events; audit rotation (continuity of the
+sequence across files, offline rotation with and without a new key, interrupted
+rotations, refused archive names) and policy reload (by timer and by SIGHUP,
+session revocation, rejected files, removed users). POSIX additionally
 checks permissions and symlinks. These tests run in the existing Windows/Linux/macOS
 CTest matrix, including POSIX sanitizer configurations.
+
+## Encrypting the connection
+
+cvault has no TLS, and it will not gain it inside the server: that needs a large
+third-party library (OpenSSL or similar) with its own certificate handling and
+release cycle, which this project deliberately avoids. The text protocol and the
+password in `AUTH` are therefore plaintext on the wire. Keep the server on
+loopback and put an authenticated, encrypted channel in front of it whenever a
+network is involved. The simplest is an SSH tunnel:
+
+```sh
+# On the client machine: local port 6380 now reaches the server's loopback port.
+ssh -N -L 6380:127.0.0.1:6380 user@vault-host
+cvault-cli --user alice --password-file alice.pw GET alice:note
+```
+
+A TLS-terminating proxy such as stunnel, a WireGuard or IPsec tunnel, or a service
+mesh sidecar works the same way: the server keeps listening on `127.0.0.1` and only
+the proxy faces the network. Never bind the server to a public address and rely on
+the password alone.
 
 ## Scope and limitations
 
 Encryption at rest does not protect a compromised host or running process memory.
 Passwords and values are plaintext in memory; buffers are wiped on release but are
-not guaranteed to be locked against swapping. The TCP connection has no TLS: keep
-loopback binding or use an authenticated encrypted tunnel. There is no interactive
-storage CLI, online policy reload, automatic account lockout across reconnects,
-remote audit anchoring, audit rotation or storage quota, and none is planned.
+not guaranteed to be locked against swapping. The TCP connection has no TLS (see
+above). There is no automatic account lockout across reconnects (the global
+verification gate limits the rate instead), no remote audit anchoring, no audit
+retention policy and no storage quota. Rotation of the policy, the audit log and
+its key, and the storage key are available; see the sections above and
+[persistence](persistence.md#rotating-the-encryption-key).
 Expired values become unreadable at their deadline and are wiped from memory by the
 periodic sweep (so up to one sweep interval later). Neither the tests nor this
 design claim a security certification or regulatory compliance. See
