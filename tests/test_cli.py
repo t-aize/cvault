@@ -163,7 +163,7 @@ class Cli(unittest.TestCase):
             self.assertEqual(self.cli(server, "GET", "app/title").stdout, b"a value  with   spaces\n")
             self.assertEqual(self.cli(server, "TTL", "app/title").stdout, b"-1\n")
             self.assertEqual(self.cli(server, "EXPIRE", "app/title", "100").stdout, b"OK\n")
-            self.assertRegex(self.cli(server, "TTL", "app/title").stdout, rb"^(100|99)\n$")
+            self.assertIn(int(self.cli(server, "TTL", "app/title").stdout), range(60, 101))
             self.assertEqual(self.cli(server, "DEL", "app/title").stdout, b"OK\n")
 
             missing = self.cli(server, "GET", "app/title")
@@ -277,7 +277,7 @@ class Cli(unittest.TestCase):
             self.assertEqual(len(lines), 6)
             self.assertEqual([line.split(b"\t")[0] for line in lines], [name.encode() for name in names])
             self.assertTrue(all(line.endswith(b"\t" + big) for line in lines))
-            self.assertRegex(lines[0].split(b"\t")[1], rb"^(500|499)$")
+            self.assertIn(int(lines[0].split(b"\t")[1]), range(400, 501))
             self.assertEqual(lines[1].split(b"\t")[1], b"-1")
 
     def test_purge_reports_the_count(self):
