@@ -242,9 +242,16 @@ class Security(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def write_policy(self, text):
-        """Write the policy file with the private permissions the server demands."""
-        self.policy.write_bytes(text.encode())
-        self.policy.chmod(0o600)
+        """Write the policy file with the private permissions the server demands.
+
+        The file is replaced atomically, like an operator should do: a server that reloads
+        the policy on a timer must never read a half-written file.
+        """
+        staging = self.policy.with_name("security.conf.new")
+
+        staging.write_bytes(text.encode())
+        staging.chmod(0o600)
+        os.replace(staging, self.policy)
 
     def server(self, *extra):
         """Start a server with the current policy and audit files."""
