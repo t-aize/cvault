@@ -391,6 +391,79 @@ static cv_status load_journal(cv_persist *store, cv_hashtable *replay, bool snap
     return status;
 }
 
+/** Sibling directory that receives the re-encrypted copy during key rotation. */
+#define REKEY_STAGING ".rekey"
+
+/** Sibling directory that holds the original while the rotated copy is swapped in. */
+#define REKEY_BACKUP ".rekey-old"
+
+/**
+ * @brief Build `<directory><suffix>` without any trailing separators of @p directory.
+ *
+ * @return A heap string, or NULL on allocation failure or an oversized path.
+ */
+static char *sibling_path(const char *directory, const char *suffix) {
+    size_t length = strlen(directory), extra = strlen(suffix);
+
+    while (length > 1 && (directory[length - 1] == '/' || directory[length - 1] == '\\')) {
+        --length;
+    }
+
+    if (length + extra + 1 > CV_PERSIST_PATH_LIMIT) {
+        return NULL;
+    }
+
+    char *path = malloc(length + extra + 1);
+
+    if (path) {
+        memcpy(path, directory, length);
+        memcpy(path + length, suffix, extra + 1);
+    }
+
+    return path;
+}
+
+/** @brief True unless the path is certainly absent (any other outcome counts as present). */
+static bool present(const char *path) {
+    cv_file_stamp stamp;
+
+    return cv_io_stamp(path, &stamp) != CV_ERR_NOT_FOUND;
+}
+
+/**
+ * @brief Finish a key rotation that a crash interrupted between its two renames.
+ *
+ * Only that exact state is recognised: the data directory is missing while both
+ * the verified copy and the original exist. The copy was fully written, synchronised
+ * and compared before the first rename, so moving it into place is safe. Without
+ * this, a missing directory would silently start an empty store.
+ */
+static cv_status settle_rekey(const char *directory) {
+    char *staging = sibling_path(directory, REKEY_STAGING);
+    char *backup = sibling_path(directory, REKEY_BACKUP);
+    cv_status status = CV_OK;
+
+    if (!staging || !backup) {
+        status = CV_ERR_NO_MEMORY;
+    } else if (!present(directory) && present(staging) && present(backup)) {
+        status = cv_io_move(staging, directory);
+
+        if (status == CV_OK) {
+            status = cv_io_sync_parent(directory);
+        }
+
+        /* The old directory only holds data under the retired key. */
+        if (status == CV_OK) {
+            (void)cv_io_remove_directory(backup);
+        }
+    }
+
+    free(staging);
+    free(backup);
+
+    return status;
+}
+
 cv_status cv_persist_open(const cv_persist_options *options, cv_persist **out) {
     if (out) {
         *out = NULL;
@@ -430,6 +503,10 @@ cv_status cv_persist_open(const cv_persist_options *options, cv_persist **out) {
     }
 
     /* Prepare the directory and take the exclusive lock before reading anything. */
+    if (status == CV_OK) {
+        status = settle_rekey(options->directory);
+    }
+
     if (status == CV_OK) {
         status = cv_io_directory(options->directory);
     }
@@ -1219,6 +1296,172 @@ cv_status cv_persist_close(cv_persist *store) {
 
     cv_crypto_wipe(store, sizeof(*store));
     free(store);
+
+    return status;
+}
+
+/** Context of the comparison between the original table and its re-encrypted copy. */
+typedef struct {
+    const cv_hashtable *copy; /* Table recovered from the rotated directory. */
+} comparison;
+
+/** @brief Visitor: every live original entry must exist unchanged in the copy. */
+static cv_status compare_entry(void *opaque,
+                               const char *key,
+                               const unsigned char *value,
+                               size_t length,
+                               bool expires,
+                               uint64_t remaining) {
+    const comparison *check = opaque;
+    const unsigned char *other = NULL;
+    size_t other_length = 0;
+
+    (void)expires;
+    (void)remaining;
+
+    cv_status status = cv_hashtable_get(check->copy, key, &other, &other_length);
+
+    if (status == CV_ERR_NOT_FOUND ||
+        (status == CV_OK && (other_length != length || (length && memcmp(other, value, length))))) {
+        return CV_ERR_CORRUPT;
+    }
+
+    return status;
+}
+
+/**
+ * @brief Write the re-encrypted copy into the staging directory and verify it.
+ *
+ * @param source The open original store.
+ * @return #CV_OK when the copy has been written, closed and found equal.
+ */
+static cv_status write_rotated_copy(cv_persist *source,
+                                    const char *staging,
+                                    const unsigned char new_key[CV_PERSIST_KEY_BYTES]) {
+    cv_persist_options options = {staging, new_key, CV_PERSIST_KEY_BYTES, NULL, NULL};
+    cv_persist *fresh = NULL;
+    cv_status status = cv_persist_open(&options, &fresh);
+
+    /* The fresh store is empty: give it the live state, then checkpoint it. */
+    cv_hashtable *state = NULL;
+
+    if (status == CV_OK) {
+        status = cv_hashtable_clone(source->table, &state);
+    }
+
+    if (status == CV_OK) {
+        cv_hashtable_destroy(fresh->table);
+
+        fresh->table = state;
+        status = cv_persist_snapshot(fresh);
+    }
+
+    cv_status closed = cv_persist_close(fresh);
+
+    if (status == CV_OK) {
+        status = closed;
+    }
+
+    /* Read the copy back with the new key and compare it with the original. */
+    cv_persist *copy = NULL;
+
+    if (status == CV_OK) {
+        status = cv_persist_open(&options, &copy);
+    }
+
+    if (status == CV_OK) {
+        comparison check = {copy->table};
+
+        status = cv_hashtable_visit(source->table, false, compare_entry, &check);
+    }
+
+    closed = cv_persist_close(copy);
+
+    return status == CV_OK ? closed : status;
+}
+
+cv_status cv_persist_rotate_key(const char *directory,
+                                const unsigned char old_key[CV_PERSIST_KEY_BYTES],
+                                const unsigned char new_key[CV_PERSIST_KEY_BYTES]) {
+    if (!directory || directory[0] == '\0' || !old_key || !new_key ||
+        sodium_memcmp(old_key, new_key, CV_PERSIST_KEY_BYTES) == 0) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    char *root = sibling_path(directory, "");
+    char *staging = sibling_path(directory, REKEY_STAGING);
+    char *backup = sibling_path(directory, REKEY_BACKUP);
+
+    if (!root || !staging || !backup) {
+        free(root);
+        free(staging);
+        free(backup);
+
+        return CV_ERR_NO_MEMORY;
+    }
+
+    /* A leftover of an earlier attempt needs a human decision, never an overwrite. */
+    cv_status status = present(staging) || present(backup) ? CV_ERR_BUSY : CV_OK;
+
+    /* Opening would create an empty store, which is never what a rotation means. */
+    cv_file_stamp stamp;
+
+    if (status == CV_OK && cv_io_stamp(root, &stamp) != CV_OK) {
+        status = CV_ERR_NOT_FOUND;
+    }
+
+    if (status != CV_OK) {
+        free(root);
+        free(staging);
+        free(backup);
+
+        return status;
+    }
+
+    cv_persist_options options = {directory, old_key, CV_PERSIST_KEY_BYTES, NULL, NULL};
+    cv_persist *source = NULL;
+
+    status = cv_persist_open(&options, &source);
+
+    if (status == CV_OK) {
+        status = write_rotated_copy(source, staging, new_key);
+    }
+
+    /* Closing releases the directory lock, which must be gone before it is renamed. */
+    cv_status closed = cv_persist_close(source);
+
+    if (status == CV_OK) {
+        status = closed;
+    }
+
+    if (status != CV_OK) {
+        (void)cv_io_remove_directory(staging);
+    } else {
+        status = cv_io_move(root, backup);
+
+        if (status != CV_OK) {
+            (void)cv_io_remove_directory(staging);
+        } else {
+            status = cv_io_move(staging, root);
+
+            /* Without the new directory the original must stay reachable. */
+            if (status != CV_OK) {
+                (void)cv_io_move(backup, root);
+            }
+        }
+
+        if (status == CV_OK) {
+            status = cv_io_sync_parent(root);
+        }
+
+        if (status == CV_OK) {
+            status = cv_io_remove_directory(backup);
+        }
+    }
+
+    free(root);
+    free(staging);
+    free(backup);
 
     return status;
 }

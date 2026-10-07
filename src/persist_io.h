@@ -23,6 +23,13 @@
 /** Longest accepted path in bytes, including the terminator. */
 #define CV_PERSIST_PATH_LIMIT ((size_t)4096)
 
+/** Identity of a file's current contents, used to notice that it was modified or replaced. */
+typedef struct {
+    uint64_t modified; /**< Last modification time in nanosecond-like platform ticks. */
+    uint64_t size;     /**< Size in bytes. */
+    uint64_t identity; /**< Inode (POSIX) or creation time (Windows): changes on replacement. */
+} cv_file_stamp;
+
 /** Exclusive process-wide lock on a lock file; `native` is -1 when not held. */
 typedef struct {
     intptr_t native; /**< File descriptor (POSIX) or HANDLE (Windows). */
@@ -115,11 +122,47 @@ cv_status cv_io_truncate(FILE *file, uint64_t offset);
  */
 cv_status cv_io_publish(const char *temporary, const char *destination, const char *directory);
 
+/**
+ * @brief Rename a file without synchronising the directory.
+ *
+ * Windows refuses to replace an existing destination. POSIX replaces it, so
+ * callers that must not overwrite check for the destination first, while holding
+ * the lock that serialises their directory. Follow with cv_io_sync_parent() to
+ * make the rename durable.
+ *
+ * @return #CV_OK, #CV_ERR_INVALID_ARGUMENT, #CV_ERR_NO_MEMORY or #CV_ERR_IO.
+ */
+cv_status cv_io_move(const char *from, const char *to);
+
 /** @brief Synchronise a directory so that renames inside it are durable. */
 cv_status cv_io_sync_directory(const char *path);
 
 /** @brief Synchronise the directory that contains @p path. */
 cv_status cv_io_sync_parent(const char *path);
+
+/**
+ * @brief Read the stamp of a file without opening it.
+ *
+ * Two equal stamps mean the file was neither modified nor replaced in between, to
+ * the resolution of the platform's clock.
+ *
+ * @param path  File path.
+ * @param stamp Receives the stamp; zeroed on error.
+ * @return #CV_OK, #CV_ERR_NOT_FOUND, #CV_ERR_INVALID_ARGUMENT, #CV_ERR_NO_MEMORY or
+ *         #CV_ERR_IO.
+ */
+cv_status cv_io_stamp(const char *path, cv_file_stamp *stamp);
+
+/**
+ * @brief Delete a directory together with the plain files inside it.
+ *
+ * Not recursive: a subdirectory makes the call fail, so only the flat layout of a
+ * data directory can be removed this way.
+ *
+ * @return #CV_OK, #CV_ERR_NOT_FOUND when the directory is absent, #CV_ERR_NO_MEMORY,
+ *         #CV_ERR_INVALID_ARGUMENT or #CV_ERR_IO.
+ */
+cv_status cv_io_remove_directory(const char *path);
 
 /** @brief Best-effort removal of a file; errors are ignored. */
 void cv_io_remove(const char *path);

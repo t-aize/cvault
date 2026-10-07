@@ -20,11 +20,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <fcntl.h>
 #include <io.h>
+#include <wchar.h>
 #include <windows.h>
 
 /* SDDL declarations depend on the Windows types and calling conventions. */
 #include <sddl.h>
 #else
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -562,6 +564,192 @@ cv_status cv_io_publish(const char *temporary, const char *destination, const ch
 #endif
 
     return cv_io_sync_directory(directory);
+}
+
+cv_status cv_io_move(const char *from, const char *to) {
+    if (!valid_path(from) || !valid_path(to)) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+#ifdef _WIN32
+    wchar_t *source = wide_path(from), *target = wide_path(to);
+
+    if (source == NULL || target == NULL) {
+        free(source);
+        free(target);
+
+        return CV_ERR_NO_MEMORY;
+    }
+
+    BOOL success = MoveFileExW(source, target, MOVEFILE_WRITE_THROUGH);
+
+    free(source);
+    free(target);
+
+    return success ? CV_OK : CV_ERR_IO;
+#else
+    return rename(from, to) == 0 ? CV_OK : CV_ERR_IO;
+#endif
+}
+
+cv_status cv_io_stamp(const char *path, cv_file_stamp *stamp) {
+    if (stamp) {
+        memset(stamp, 0, sizeof(*stamp));
+    }
+
+    if (!stamp || !valid_path(path)) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+#ifdef _WIN32
+    wchar_t *wide = wide_path(path);
+
+    if (wide == NULL) {
+        return CV_ERR_NO_MEMORY;
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    BOOL success = GetFileAttributesExW(wide, GetFileExInfoStandard, &data);
+    DWORD error = success ? 0 : GetLastError();
+
+    free(wide);
+
+    if (!success) {
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? CV_ERR_NOT_FOUND
+                                                                              : CV_ERR_IO;
+    }
+
+    stamp->modified =
+        ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+    stamp->size = ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+    stamp->identity =
+        ((uint64_t)data.ftCreationTime.dwHighDateTime << 32) | data.ftCreationTime.dwLowDateTime;
+#else
+    struct stat info;
+
+    if (stat(path, &info) != 0) {
+        return errno == ENOENT ? CV_ERR_NOT_FOUND : CV_ERR_IO;
+    }
+
+#ifdef __APPLE__
+    const struct timespec modified = info.st_mtimespec;
+#else
+    const struct timespec modified = info.st_mtim;
+#endif
+
+    stamp->modified = (uint64_t)modified.tv_sec * UINT64_C(1000000000) + (uint64_t)modified.tv_nsec;
+    stamp->size = (uint64_t)info.st_size;
+    stamp->identity = (uint64_t)info.st_ino;
+#endif
+
+    return CV_OK;
+}
+
+cv_status cv_io_remove_directory(const char *path) {
+    if (!valid_path(path)) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    cv_status status = CV_OK;
+
+#ifdef _WIN32
+    char *pattern = cv_io_path(path, "*");
+    wchar_t *wide_pattern = pattern ? wide_path(pattern) : NULL;
+
+    free(pattern);
+
+    if (wide_pattern == NULL) {
+        return CV_ERR_NO_MEMORY;
+    }
+
+    WIN32_FIND_DATAW entry;
+    HANDLE search = FindFirstFileW(wide_pattern, &entry);
+
+    free(wide_pattern);
+
+    if (search == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+
+        return error == ERROR_PATH_NOT_FOUND || error == ERROR_FILE_NOT_FOUND ? CV_ERR_NOT_FOUND
+                                                                              : CV_ERR_IO;
+    }
+
+    do {
+        if (wcscmp(entry.cFileName, L".") == 0 || wcscmp(entry.cFileName, L"..") == 0) {
+            continue;
+        }
+
+        wchar_t *wide_directory = wide_path(path);
+
+        if (wide_directory == NULL) {
+            status = CV_ERR_NO_MEMORY;
+            break;
+        }
+
+        size_t length = wcslen(wide_directory) + wcslen(entry.cFileName) + 2;
+        wchar_t *wide_entry = malloc(length * sizeof(*wide_entry));
+
+        if (wide_entry == NULL) {
+            free(wide_directory);
+            status = CV_ERR_NO_MEMORY;
+            break;
+        }
+
+        (void)swprintf(wide_entry, length, L"%ls\\%ls", wide_directory, entry.cFileName);
+
+        if (!DeleteFileW(wide_entry)) {
+            status = CV_ERR_IO;
+        }
+
+        free(wide_entry);
+        free(wide_directory);
+    } while (status == CV_OK && FindNextFileW(search, &entry));
+
+    (void)FindClose(search);
+
+    if (status == CV_OK) {
+        wchar_t *wide_directory = wide_path(path);
+
+        if (wide_directory == NULL) {
+            return CV_ERR_NO_MEMORY;
+        }
+
+        status = RemoveDirectoryW(wide_directory) ? CV_OK : CV_ERR_IO;
+
+        free(wide_directory);
+    }
+#else
+    DIR *directory = opendir(path);
+
+    if (directory == NULL) {
+        return errno == ENOENT ? CV_ERR_NOT_FOUND : CV_ERR_IO;
+    }
+
+    for (const struct dirent *entry = readdir(directory); entry != NULL && status == CV_OK;
+         entry = readdir(directory)) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char *file = cv_io_path(path, entry->d_name);
+
+        if (file == NULL) {
+            status = CV_ERR_NO_MEMORY;
+        } else if (unlink(file) != 0) {
+            status = CV_ERR_IO;
+        }
+
+        free(file);
+    }
+
+    (void)closedir(directory);
+
+    if (status == CV_OK && rmdir(path) != 0) {
+        status = CV_ERR_IO;
+    }
+#endif
+
+    return status;
 }
 
 void cv_io_remove(const char *path) {

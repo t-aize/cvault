@@ -285,6 +285,309 @@ class Security(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def archives(self):
+        """Sealed audit files, oldest first (their names end in the last sequence number)."""
+        return sorted(path for path in self.root.glob("audit.bin.[0-9]*") if not path.name.endswith(".lock"))
+
+    def dump(self, path, key=None, expect_ok=True):
+        """Export one audit file; returns the events, or the failed process when not ``expect_ok``."""
+        result = run("--dump-audit", path, "--audit-key-file", key or self.key)
+
+        if not expect_ok:
+            self.assertNotEqual(result.returncode, 0)
+
+            return result
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        return [json.loads(line) for line in result.stdout.splitlines()]
+
+    def assert_continuous(self, files):
+        """The files, in order, hold sequence numbers 1..N without gaps, linked by ROTATE events."""
+        expected = 1
+
+        for index, events in enumerate(files):
+            self.assertTrue(events, "an audit file is never empty")
+
+            for event in events:
+                self.assertEqual(event["sequence"], expected)
+
+                expected += 1
+
+            if index + 1 < len(files):
+                self.assertEqual((events[-1]["operation"], events[-1]["phase"]), ("ROTATE", "intent"))
+
+            if index:
+                self.assertEqual((events[0]["operation"], events[0]["phase"], events[0]["status"],
+                                  events[0]["identity"]), ("ROTATE", "result", 0, "server"))
+
+    def eventually(self, condition, timeout=15):
+        """Poll a condition until it holds; fails the test on timeout."""
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            if condition():
+                return
+
+            time.sleep(0.1)
+
+        self.fail("condition not reached in time")
+
+    def test_audit_rotates_when_it_grows_and_stays_continuous(self):
+        """Past --audit-max-bytes the log is sealed and continued; nothing is lost or reordered."""
+        with self.server("--audit-max-bytes", "3000") as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+            for index in range(40):
+                self.assertEqual(alice.command(f"SET alice:k{index} value".encode()), b"+OK\n")
+
+            self.eventually(lambda: len(self.archives()) >= 3)
+
+        archives = self.archives()
+
+        self.assertGreaterEqual(len(archives), 3)
+
+        files = [self.dump(path) for path in archives] + [self.dump(self.audit)]
+
+        self.assert_continuous(files)
+
+        # The first file starts the run; the last one ends it; every SET is accounted for twice.
+        self.assertEqual(files[0][0]["operation"], "START")
+        self.assertEqual(files[-1][-1]["operation"], "STOP")
+        self.assertEqual(sum(1 for events in files for event in events if event["operation"] == "SET"), 80)
+
+        # An archive is named after its last sequence number.
+        for path, events in zip(archives, files):
+            self.assertEqual(int(path.name.rsplit(".", 1)[1]), events[-1]["sequence"])
+
+        # Every file is large enough to have triggered the rotation, and none is left staged.
+        self.assertFalse((self.root / "audit.bin.next").exists())
+
+    def test_audit_is_not_rotated_without_the_option(self):
+        """Without --audit-max-bytes the log only grows."""
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+            for index in range(30):
+                self.assertEqual(alice.command(f"SET alice:k{index} value".encode()), b"+OK\n")
+
+        self.assertEqual(self.archives(), [])
+
+    def test_offline_rotation_keeps_the_key_or_changes_it(self):
+        """--rotate-audit seals the file; with --new-audit-key-file the continuation uses that key."""
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:x 1"), b"+OK\n")
+
+        first = self.dump(self.audit)
+
+        # Same key.
+        result = run("--rotate-audit", self.audit, "--audit-key-file", self.key)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"Sealed audit log:", result.stdout)
+
+        (archive,) = self.archives()
+
+        self.assert_continuous([self.dump(archive), self.dump(self.audit)])
+        self.assertEqual(len(self.dump(archive)), len(first) + 1)
+        self.assertEqual(len(self.dump(self.audit)), 1)
+
+        # New key: the archive stays readable with the old one, the new file only with the new one.
+        new_key = self.root / "audit2.key"
+
+        self.assertEqual(run("--generate-key", new_key).returncode, 0)
+
+        result = run("--rotate-audit", self.audit, "--audit-key-file", self.key, "--new-audit-key-file", new_key)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        archives = self.archives()
+
+        self.assertEqual(len(archives), 2)
+
+        self.dump(self.audit, expect_ok=False)
+        self.assert_continuous([self.dump(archives[0]), self.dump(archives[1]), self.dump(self.audit, new_key)])
+
+        # The server continues the log under the new key, and only under it.
+        old_key, self.key = self.key, new_key
+
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+        events = self.dump(self.audit, new_key)
+
+        self.assert_continuous([self.dump(archives[0], old_key), self.dump(archives[1], old_key), events])
+        self.assertEqual(events[-1]["operation"], "STOP")
+
+    def test_rotation_is_refused_when_the_archive_name_is_taken(self):
+        """An existing archive is never overwritten, and the log stays untouched."""
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+        events = self.dump(self.audit)
+        taken = Path(f"{self.audit}.{len(events) + 1:020d}")
+
+        taken.write_bytes(b"precious")
+        taken.chmod(0o600)
+
+        result = run("--rotate-audit", self.audit, "--audit-key-file", self.key)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(taken.read_bytes(), b"precious")
+        self.assertEqual(self.dump(self.audit), events)
+        self.assertFalse((self.root / "audit.bin.next").exists())
+
+    def test_interrupted_rotation_is_completed_or_discarded_on_start(self):
+        """A leftover staging file either finishes the swap or is dropped, depending on the log."""
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+        new_key = self.root / "audit2.key"
+
+        self.assertEqual(run("--generate-key", new_key).returncode, 0)
+        self.assertEqual(run("--rotate-audit", self.audit, "--audit-key-file", self.key,
+                             "--new-audit-key-file", new_key).returncode, 0)
+
+        # Crash after the old file was archived but before the new one took its place.
+        staging = self.root / "audit.bin.next"
+        rotated = self.dump(self.audit, new_key)
+
+        self.audit.rename(staging)
+
+        self.key = new_key
+
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+        self.assertFalse(staging.exists())
+        self.assert_continuous([self.dump(self.archives()[0], self.root / "audit.key"),
+                                self.dump(self.audit, new_key)])
+        self.assertEqual(self.dump(self.audit, new_key)[0]["sequence"], rotated[0]["sequence"])
+
+        # Crash before the swap: both files exist and the staging file is stale.
+        staging.write_bytes(b"stale preparation")
+        staging.chmod(0o600)
+
+        before = self.dump(self.audit, new_key)
+
+        with self.server() as server:
+            pass
+
+        self.assertFalse(staging.exists())
+        self.assertEqual(self.dump(self.audit, new_key)[:len(before)], before)
+
+    def test_rotation_options_are_validated(self):
+        """The rotation and reload options need their companions and stand alone where required."""
+        key = self.key
+
+        for options in (["--rotate-audit", str(self.audit)],
+                        ["--rotate-audit", str(self.audit), "--audit-key-file", str(key), "--port", "0"],
+                        ["--rotate-audit", str(self.audit), "--audit-key-file", str(key), "--audit", str(self.audit)],
+                        ["--rotate-audit", str(self.audit), "--audit-key-file", str(key),
+                         "--new-key-file", str(key)],
+                        ["--dump-audit", str(self.audit), "--audit-key-file", str(key),
+                         "--new-audit-key-file", str(key)],
+                        ["--new-audit-key-file", str(key)],
+                        ["--audit-max-bytes", "1000"],
+                        ["--policy-reload-ms", "100"],
+                        ["--port", "0", "--security", str(self.policy), "--audit", str(self.audit),
+                         "--audit-key-file", str(key), "--audit-max-bytes", "0"],
+                        ["--port", "0", "--security", str(self.policy), "--audit", str(self.audit),
+                         "--audit-key-file", str(key), "--policy-reload-ms", "x"]):
+            with self.subTest(options=options):
+                result = run(*options)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(b"Listening", result.stdout)
+
+    def swap_policy(self, grants):
+        """Replace the policy with one that only gives alice the listed grant lines."""
+        self.write_policy(f"CVAULT-SECURITY-1\nuser alice {self.hash}\n{grants}")
+
+    def reload_events(self):
+        """The RELOAD events of the audit log, in order."""
+        return [event for event in self.dump(self.audit) if event["operation"] == "RELOAD"]
+
+    def test_policy_reload_by_timer_revokes_sessions_and_applies_new_grants(self):
+        """A changed policy file is picked up; sessions must log in again and get the new grants."""
+        with self.server("--policy-reload-ms", "100") as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:x 1"), b"+OK\n")
+
+            self.swap_policy("allow alice rw bob:\n")
+            self.eventually(lambda: alice.command(b"GET alice:x") == b"-ERR access denied\n")
+
+            # The session was revoked, not just narrowed: the new grants need a new login.
+            self.assertEqual(alice.command(b"SET bob:x 1"), b"-ERR access denied\n")
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:x 2"), b"-ERR access denied\n")
+            self.assertEqual(alice.command(b"SET bob:x 2"), b"+OK\n")
+            self.assertEqual(alice.command(b"GET bob:x"), b"2")
+
+        (event,) = self.reload_events()
+
+        self.assertEqual((event["phase"], event["status"], event["identity"]), ("result", 0, "server"))
+
+    def test_rejected_policy_keeps_the_old_one_and_is_reported_once(self):
+        """A broken policy file changes nothing, is audited, and is not retried until it changes."""
+        with self.server("--policy-reload-ms", "100") as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+
+            self.write_policy("this is not a policy\n")
+            time.sleep(1.0)
+
+            # Still logged in, with the old grants.
+            self.assertEqual(alice.command(b"SET alice:x 1"), b"+OK\n")
+
+            self.swap_policy("allow alice rw bob:\n")
+            self.eventually(lambda: alice.command(b"GET alice:x") == b"-ERR access denied\n")
+
+        statuses = [event["status"] for event in self.reload_events()]
+
+        self.assertEqual(len(statuses), 2, statuses)
+        self.assertNotEqual(statuses[0], 0)
+        self.assertEqual(statuses[1], 0)
+
+    def test_policy_reload_can_remove_a_user(self):
+        """A user who disappears from the policy can no longer log in."""
+        with self.server("--policy-reload-ms", "100") as server, server.connect() as writer:
+            self.assertEqual(writer.auth(b"writer"), b"+OK\n")
+            self.assertEqual(writer.command(b"SET shared:x 1"), b"+OK\n")
+
+            self.swap_policy("allow alice rw alice:\n")
+            self.eventually(lambda: writer.command(b"SET shared:x 2") == b"-ERR access denied\n")
+
+            self.assertEqual(writer.auth(b"writer"), b"-ERR authentication failed\n")
+
+    @unittest.skipIf(os.name == "nt", "SIGHUP exists only on POSIX")
+    def test_sighup_reloads_even_an_unchanged_policy(self):
+        """SIGHUP forces a reload: sessions are revoked and the event is audited."""
+        with self.server() as server, server.connect() as alice:
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(alice.command(b"SET alice:x 1"), b"+OK\n")
+
+            server.process.send_signal(signal.SIGHUP)
+
+            self.eventually(lambda: alice.command(b"GET alice:x") == b"-ERR access denied\n")
+
+            # The same policy applies again after a new login.
+            self.assertEqual(alice.auth(), b"+OK\n")
+            self.assertEqual(alice.command(b"GET alice:x"), b"1")
+
+            # A policy that cannot be loaded is rejected on SIGHUP as well.
+            self.write_policy("broken\n")
+            server.process.send_signal(signal.SIGHUP)
+            time.sleep(0.5)
+
+            self.assertEqual(alice.command(b"GET alice:x"), b"1")
+
+        statuses = [event["status"] for event in self.reload_events()]
+
+        self.assertEqual(len(statuses), 2, statuses)
+        self.assertEqual(statuses[0], 0)
+        self.assertNotEqual(statuses[1], 0)
+
     def test_default_deny_and_independent_permissions(self):
         """Nothing is allowed before login; read and write grants are independent."""
         with self.server() as server, server.connect() as alice, server.connect() as writer:

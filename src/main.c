@@ -4,7 +4,8 @@
  *
  * Besides starting the server, the executable offers a few one-shot
  * maintenance modes that exit immediately: `--help`, `--version`,
- * `--generate-key`, `--hash-password` and `--dump-audit`. Options are parsed by
+ * `--generate-key`, `--hash-password`, `--dump-audit`, `--rotate-audit` and
+ * `--rotate-data-key`. Options are parsed by
  * the vendored argparse library (see third_party/README.md); numeric values are
  * validated here with a strict decimal parser.
  *
@@ -14,6 +15,8 @@
  *  3. Load the security policy and authenticate the audit log (if `--security`
  *     is given). Any failure here prevents the listener from ever opening.
  *  4. Bind the listening socket and run the event loop until a signal arrives.
+ *     The loop also reloads the policy (on SIGHUP or when the file changes) and
+ *     rotates the audit log when it grows past a size.
  *  5. Shut down in dependency order: transport, final snapshot, security
  *     service, persistence.
  */
@@ -55,7 +58,19 @@ static void handle_signal(int number) {
     stop_requested = 1;
 }
 
-/** @brief Monotonic milliseconds used only to schedule snapshots. */
+/** Set by the SIGHUP handler: the operator asked for the policy to be reloaded. */
+static volatile sig_atomic_t reload_requested = 0;
+
+#ifndef _WIN32
+/** @brief SIGHUP handler: only sets a flag, which is async-signal-safe. */
+static void handle_reload(int number) {
+    (void)number;
+
+    reload_requested = 1;
+}
+#endif
+
+/** @brief Monotonic milliseconds used to schedule snapshots, sweeps and policy checks. */
 static uint64_t scheduling_ms(void) {
     /* Scheduling only; stored expirations use the persistence clock. */
 #ifdef _WIN32
@@ -83,6 +98,8 @@ typedef struct {
     int hash_password;                /* --hash-password */
     const char *generate_key;         /* --generate-key FILE */
     const char *dump_audit;           /* --dump-audit FILE */
+    const char *rotate_audit;         /* --rotate-audit FILE */
+    const char *rotate_data_key;      /* --rotate-data-key DIRECTORY */
     const char *bind;                 /* --bind ADDRESS */
     const char *port;                 /* --port PORT */
     const char *max_clients;          /* --max-clients COUNT */
@@ -92,12 +109,16 @@ typedef struct {
     const char *shutdown_timeout_ms;  /* --shutdown-timeout-ms MS */
     const char *data;                 /* --data DIRECTORY */
     const char *key_file;             /* --key-file FILE */
+    const char *new_key_file;         /* --new-key-file FILE */
     const char *snapshot_interval_ms; /* --snapshot-interval-ms MS */
     const char *expiry_sweep_ms;      /* --expiry-sweep-ms MS */
     int compact;                      /* --compact */
     const char *security;             /* --security FILE */
     const char *audit;                /* --audit FILE */
     const char *audit_key_file;       /* --audit-key-file FILE */
+    const char *new_audit_key_file;   /* --new-audit-key-file FILE */
+    const char *audit_max_bytes;      /* --audit-max-bytes BYTES */
+    const char *policy_reload_ms;     /* --policy-reload-ms MS */
 } cli_options;
 
 /**
@@ -168,6 +189,13 @@ static bool parse_arguments(int argc, char **argv, cli_options *options) {
                    0,
                    0),
         OPT_STRING(0,
+                   "new-key-file",
+                   &options->new_key_file,
+                   "with --rotate-data-key: the new private 32-byte key",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
                    "snapshot-interval-ms",
                    &options->snapshot_interval_ms,
                    "background checkpoint interval (default 60000)",
@@ -211,6 +239,21 @@ static bool parse_arguments(int argc, char **argv, cli_options *options) {
                    NULL,
                    0,
                    0),
+        OPT_STRING(0,
+                   "audit-max-bytes",
+                   &options->audit_max_bytes,
+                   "seal the audit log and start a new one past this size (default: never)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "policy-reload-ms",
+                   &options->policy_reload_ms,
+                   "reload the policy when its file changes, checked this often "
+                   "(default: only on SIGHUP)",
+                   NULL,
+                   0,
+                   0),
 
         OPT_GROUP("Maintenance commands (run once, then exit)"),
         OPT_STRING(0,
@@ -235,6 +278,29 @@ static bool parse_arguments(int argc, char **argv, cli_options *options) {
                    NULL,
                    0,
                    0),
+        OPT_STRING(0,
+                   "rotate-audit",
+                   &options->rotate_audit,
+                   "seal this audit file and continue it in a new one (needs --audit-key-file, "
+                   "optionally --new-audit-key-file; server stopped)",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "new-audit-key-file",
+                   &options->new_audit_key_file,
+                   "with --rotate-audit: encrypt the new audit file under this key",
+                   NULL,
+                   0,
+                   0),
+        OPT_STRING(0,
+                   "rotate-data-key",
+                   &options->rotate_data_key,
+                   "re-encrypt this data directory under --new-key-file (needs --key-file, "
+                   "server stopped)",
+                   NULL,
+                   0,
+                   0),
         OPT_END(),
     };
     struct argparse parser;
@@ -243,7 +309,8 @@ static bool parse_arguments(int argc, char **argv, cli_options *options) {
     argparse_describe(&parser,
                       "\nA small encrypted key-value store served over TCP.",
                       "\nTCP transport: AUTH and prefix-controlled storage with --security; "
-                      "otherwise PING/QUIT probes only.");
+                      "otherwise PING/QUIT probes only. With --security, SIGHUP reloads the "
+                      "policy (POSIX).");
 
     /* argparse returns the number of leftover positional arguments. */
     if (argparse_parse(&parser, argc, (const char **)argv) != 0) {
@@ -328,6 +395,8 @@ typedef struct {
     uint32_t snapshot_interval_ms; /* Period of the background checkpoints. */
     uint32_t expiry_sweep_ms;      /* Period of the expired-entry sweep. */
     bool compact;                  /* Compact the journal after each snapshot. */
+    uint64_t audit_max_bytes;      /* Audit size that triggers a rotation (0: never). */
+    uint32_t policy_reload_ms;     /* Period of the policy file check (0: SIGHUP only). */
 } server_settings;
 
 /**
@@ -343,6 +412,7 @@ static bool build_settings(const cli_options *options, server_settings *settings
     unsigned long idle = config->idle_timeout_ms, frame = config->frame_timeout_ms;
     unsigned long shutdown = config->shutdown_timeout_ms, interval = settings->snapshot_interval_ms;
     unsigned long sweep = settings->expiry_sweep_ms;
+    unsigned long audit_limit = 0, reload = settings->policy_reload_ms;
 
     if (!read_number("port", options->port, UINT16_MAX, true, &port) ||
         !read_number("max-clients",
@@ -356,7 +426,9 @@ static bool build_settings(const cli_options *options, server_settings *settings
             "shutdown-timeout-ms", options->shutdown_timeout_ms, INT_MAX, false, &shutdown) ||
         !read_number(
             "snapshot-interval-ms", options->snapshot_interval_ms, INT_MAX, false, &interval) ||
-        !read_number("expiry-sweep-ms", options->expiry_sweep_ms, INT_MAX, false, &sweep)) {
+        !read_number("expiry-sweep-ms", options->expiry_sweep_ms, INT_MAX, false, &sweep) ||
+        !read_number("audit-max-bytes", options->audit_max_bytes, ULONG_MAX, false, &audit_limit) ||
+        !read_number("policy-reload-ms", options->policy_reload_ms, INT_MAX, false, &reload)) {
         return false;
     }
 
@@ -368,6 +440,8 @@ static bool build_settings(const cli_options *options, server_settings *settings
     settings->snapshot_interval_ms = (uint32_t)interval;
     settings->expiry_sweep_ms = (uint32_t)sweep;
     settings->compact = options->compact != 0;
+    settings->audit_max_bytes = audit_limit;
+    settings->policy_reload_ms = (uint32_t)reload;
 
     if (options->bind) {
         config->bind_address = options->bind;
@@ -465,32 +539,152 @@ static int dump_audit(const char *audit_path, const char *key_path) {
     return result == CV_OK ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+/**
+ * @brief Implement `--rotate-audit`: seal the audit log and continue it in a new file.
+ *
+ * The sealed file keeps its key and stays readable with `--dump-audit`. With a new
+ * key file the continuation is encrypted under that key instead.
+ *
+ * @param audit_path   Path of the audit log.
+ * @param key_path     Path of the current audit master key file.
+ * @param new_key_path Path of the new master key file, or NULL to keep the key.
+ * @return EXIT_SUCCESS or EXIT_FAILURE.
+ */
+static int rotate_audit(const char *audit_path, const char *key_path, const char *new_key_path) {
+    unsigned char key[CV_PERSIST_KEY_BYTES] = {0}, next[CV_PERSIST_KEY_BYTES] = {0};
+    char archive[CV_AUDIT_ARCHIVE_BYTES];
+    cv_audit *audit = NULL;
+    cv_status result = cv_persist_key_load(key_path, key);
+
+    if (result == CV_OK && new_key_path) {
+        result = cv_persist_key_load(new_key_path, next);
+    }
+
+    if (result == CV_OK) {
+        result = cv_audit_open(audit_path, key, false, &audit);
+    }
+
+    if (result == CV_OK) {
+        result = cv_audit_rotate(audit, new_key_path ? next : NULL, archive, sizeof(archive));
+    }
+
+    cv_crypto_wipe(key, sizeof(key));
+    cv_crypto_wipe(next, sizeof(next));
+
+    cv_status closed = cv_audit_close(audit);
+
+    if (result == CV_OK) {
+        result = closed;
+    }
+
+    if (result != CV_OK) {
+        fprintf(stderr, "cvault-server: audit rotation failed: %s\n", cv_status_string(result));
+
+        return EXIT_FAILURE;
+    }
+
+    printf("Sealed audit log: %s\nContinuing in: %s\n", archive, audit_path);
+
+    return fflush(stdout) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/**
+ * @brief Implement `--rotate-data-key`: re-encrypt a data directory under a new key.
+ *
+ * @param directory    Data directory to rotate.
+ * @param key_path     Path of the current key file.
+ * @param new_key_path Path of the new key file.
+ * @return EXIT_SUCCESS or EXIT_FAILURE.
+ */
+static int rotate_data_key(const char *directory, const char *key_path, const char *new_key_path) {
+    unsigned char key[CV_PERSIST_KEY_BYTES] = {0}, next[CV_PERSIST_KEY_BYTES] = {0};
+    cv_status result = cv_persist_key_load(key_path, key);
+
+    if (result == CV_OK) {
+        result = cv_persist_key_load(new_key_path, next);
+    }
+
+    if (result == CV_OK) {
+        result = cv_persist_rotate_key(directory, key, next);
+    }
+
+    cv_crypto_wipe(key, sizeof(key));
+    cv_crypto_wipe(next, sizeof(next));
+
+    if (result != CV_OK) {
+        fprintf(stderr, "cvault-server: key rotation failed: %s\n", cv_status_string(result));
+        fputs("cvault-server: if '<data>.rekey' or '<data>.rekey-old' exist next to the data "
+              "directory, see docs/persistence.md before trying again.\n",
+              stderr);
+
+        return EXIT_FAILURE;
+    }
+
+    puts("Data directory re-encrypted. Start the server with the new key file.");
+
+    return fflush(stdout) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 /** @brief True when any option that only makes sense for a running server was given. */
 static bool has_serving_options(const cli_options *options) {
     return options->bind || options->port || options->max_clients || options->backend ||
            options->idle_timeout_ms || options->frame_timeout_ms || options->shutdown_timeout_ms ||
            options->data || options->key_file || options->snapshot_interval_ms ||
-           options->compact || options->expiry_sweep_ms || options->security || options->audit;
+           options->compact || options->expiry_sweep_ms || options->security || options->audit ||
+           options->audit_max_bytes || options->policy_reload_ms;
+}
+
+/** Options that a maintenance command may take besides its own value. */
+enum {
+    COMPANION_AUDIT_KEY = 1 << 0,
+    COMPANION_NEW_AUDIT_KEY = 1 << 1,
+    COMPANION_KEY = 1 << 2,
+    COMPANION_NEW_KEY = 1 << 3,
+    COMPANION_OTHER = 1 << 4
+};
+
+/** @brief Which companion options were given on the command line. */
+static unsigned int given_companions(const cli_options *options) {
+    unsigned int given = 0;
+    cli_options others = *options;
+
+    given |= options->audit_key_file ? COMPANION_AUDIT_KEY : 0;
+    given |= options->new_audit_key_file ? COMPANION_NEW_AUDIT_KEY : 0;
+    given |= options->key_file ? COMPANION_KEY : 0;
+    given |= options->new_key_file ? COMPANION_NEW_KEY : 0;
+
+    /* Whatever is left over configures a running server. */
+    others.audit_key_file = others.new_audit_key_file = NULL;
+    others.key_file = others.new_key_file = NULL;
+
+    return has_serving_options(&others) ? given | COMPANION_OTHER : given;
 }
 
 /**
- * @brief Check the combination of options.
+ * @brief Check the options that accompany one maintenance command.
  *
- * Persistence and security each need all of their options. A maintenance
- * command stands alone: it cannot be combined with another command or with
- * server options.
- *
- * @param maintenance Set to true when a maintenance command was requested.
- * @return false (after printing a message) for an invalid combination.
+ * A command takes only its own companions and needs all of the required ones;
+ * anything that configures a running server is refused.
  */
-static bool check_combinations(const cli_options *options, bool *maintenance) {
-    int commands = (options->version != 0) + (options->hash_password != 0) +
-                   (options->generate_key != NULL) + (options->dump_audit != NULL);
+static bool check_maintenance(const cli_options *options) {
+    unsigned int allowed = 0, required = 0;
+    const char *command = "this command";
 
-    *maintenance = commands != 0;
+    if (options->dump_audit) {
+        allowed = required = COMPANION_AUDIT_KEY;
+        command = "--dump-audit";
+    } else if (options->rotate_audit) {
+        allowed = COMPANION_AUDIT_KEY | COMPANION_NEW_AUDIT_KEY;
+        required = COMPANION_AUDIT_KEY;
+        command = "--rotate-audit";
+    } else if (options->rotate_data_key) {
+        allowed = required = COMPANION_KEY | COMPANION_NEW_KEY;
+        command = "--rotate-data-key";
+    }
 
-    if (commands > 1 || (commands == 1 && has_serving_options(options)) ||
-        (commands == 1 && options->audit_key_file && !options->dump_audit)) {
+    unsigned int given = given_companions(options);
+
+    if (given & ~allowed) {
         fputs("cvault-server: a maintenance command cannot be combined with other options. "
               "See --help.\n",
               stderr);
@@ -498,14 +692,50 @@ static bool check_combinations(const cli_options *options, bool *maintenance) {
         return false;
     }
 
-    if (options->dump_audit && !options->audit_key_file) {
-        fputs("cvault-server: --dump-audit requires --audit-key-file. See --help.\n", stderr);
+    if (required & ~given) {
+        fprintf(stderr, "cvault-server: %s needs its key options. See --help.\n", command);
 
         return false;
     }
 
-    if (commands != 0) {
-        return true;
+    return true;
+}
+
+/**
+ * @brief Check the combination of options.
+ *
+ * Persistence and security each need all of their options. A maintenance
+ * command stands alone: it cannot be combined with another command or with
+ * server options, except for the key files it names.
+ *
+ * @param maintenance Set to true when a maintenance command was requested.
+ * @return false (after printing a message) for an invalid combination.
+ */
+static bool check_combinations(const cli_options *options, bool *maintenance) {
+    int commands = (options->version != 0) + (options->hash_password != 0) +
+                   (options->generate_key != NULL) + (options->dump_audit != NULL) +
+                   (options->rotate_audit != NULL) + (options->rotate_data_key != NULL);
+
+    *maintenance = commands != 0;
+
+    if (commands > 1) {
+        fputs("cvault-server: a maintenance command cannot be combined with other options. "
+              "See --help.\n",
+              stderr);
+
+        return false;
+    }
+
+    if (commands == 1) {
+        return check_maintenance(options);
+    }
+
+    if (options->new_key_file || options->new_audit_key_file) {
+        fputs("cvault-server: --new-key-file and --new-audit-key-file only apply to the rotation "
+              "commands. See --help.\n",
+              stderr);
+
+        return false;
     }
 
     if ((options->data == NULL) != (options->key_file == NULL) ||
@@ -519,6 +749,12 @@ static bool check_combinations(const cli_options *options, bool *maintenance) {
         !(options->security && options->audit && options->audit_key_file)) {
         fputs("Security requires --security, --audit and --audit-key-file together. See --help.\n",
               stderr);
+
+        return false;
+    }
+
+    if ((options->audit_max_bytes || options->policy_reload_ms) && !options->security) {
+        fputs("--audit-max-bytes and --policy-reload-ms need --security. See --help.\n", stderr);
 
         return false;
     }
@@ -548,6 +784,15 @@ static int run_maintenance(const cli_options *options) {
         return dump_audit(options->dump_audit, options->audit_key_file);
     }
 
+    if (options->rotate_audit) {
+        return rotate_audit(
+            options->rotate_audit, options->audit_key_file, options->new_audit_key_file);
+    }
+
+    if (options->rotate_data_key) {
+        return rotate_data_key(options->rotate_data_key, options->key_file, options->new_key_file);
+    }
+
     /* Catch interruption while terminal echo is disabled. The normal read
      * error path restores terminal state and wipes the password buffer. */
     cv_console_signals previous;
@@ -563,9 +808,68 @@ static int run_maintenance(const cli_options *options) {
     return result;
 }
 
+/**
+ * @brief Report the outcome of a policy reload.
+ *
+ * A failure that poisoned the service is not reported here: the main loop's health
+ * check stops the server on it.
+ */
+static void report_reload(const cv_security *security, cv_status status) {
+    if (status == CV_OK) {
+        puts("Policy reloaded; clients must authenticate again.");
+        fflush(stdout);
+    } else if (cv_security_status(security) == CV_OK) {
+        fprintf(stderr,
+                "cvault-server: policy reload rejected (%s); keeping the previous policy\n",
+                cv_status_string(status));
+    }
+}
+
+/**
+ * @brief Apply a pending policy reload and rotate the audit log when it is due.
+ *
+ * Both are best effort for ordinary failures: a rejected policy or a failed
+ * rotation is reported and serving continues with the previous state.
+ *
+ * @param last_check Time of the last timed policy check, updated here.
+ */
+static void maintain_security(cv_security *security,
+                              const server_settings *settings,
+                              uint64_t now,
+                              uint64_t *last_check) {
+    if (reload_requested) {
+        reload_requested = 0;
+
+        report_reload(security, cv_security_reload_policy(security));
+    } else if (settings->policy_reload_ms && now >= *last_check &&
+               now - *last_check >= settings->policy_reload_ms) {
+        bool reloaded = false;
+        cv_status status = cv_security_reload_policy_if_changed(security, &reloaded);
+
+        *last_check = now;
+
+        if (reloaded || status != CV_OK) {
+            report_reload(security, status);
+        }
+    }
+
+    char archive[CV_AUDIT_ARCHIVE_BYTES];
+    cv_status rotated =
+        cv_security_rotate_audit(security, settings->audit_max_bytes, archive, sizeof(archive));
+
+    if (rotated == CV_OK && archive[0] != '\0') {
+        printf("Audit log sealed: %s\n", archive);
+        fflush(stdout);
+    } else if (rotated != CV_OK && cv_security_status(security) == CV_OK) {
+        fprintf(stderr,
+                "cvault-server: audit rotation failed (%s); the log keeps growing\n",
+                cv_status_string(rotated));
+    }
+}
+
 /** @brief Recover state, serve until a signal arrives, shut down in order. */
 static int run_server(const cli_options *options) {
-    server_settings settings = {cv_server_config_default(), 60000, 1000, false};
+    server_settings settings = {cv_server_config_default(), 60000, 1000, false, 0, 0};
 
     if (!build_settings(options, &settings)) {
         return EXIT_FAILURE;
@@ -643,6 +947,21 @@ static int run_server(const cli_options *options) {
         return EXIT_FAILURE;
     }
 
+    /* SIGHUP asks for a policy reload; without a policy it keeps its default action. */
+#ifndef _WIN32
+    struct sigaction reload_previous;
+    bool reload_installed = false;
+
+    if (security) {
+        struct sigaction reload_action = {0};
+
+        reload_action.sa_handler = handle_reload;
+
+        reload_installed = sigemptyset(&reload_action.sa_mask) == 0 &&
+                           sigaction(SIGHUP, &reload_action, &reload_previous) == 0;
+    }
+#endif
+
     printf("Listening on %s:%u (%s)\n",
            config.bind_address,
            (unsigned int)cv_server_port(server),
@@ -651,6 +970,7 @@ static int run_server(const cli_options *options) {
 
     /* Main loop: step the transport, watch service health, schedule snapshots. */
     uint64_t last_snapshot = scheduling_ms(), last_sweep = last_snapshot;
+    uint64_t last_policy_check = last_snapshot;
 
     while (status == CV_OK && !cv_server_is_stopped(server)) {
         if (stop_requested) {
@@ -659,6 +979,10 @@ static int run_server(const cli_options *options) {
 
         if (status == CV_OK) {
             status = cv_server_step(server, 100);
+        }
+
+        if (status == CV_OK && security) {
+            maintain_security(security, &settings, scheduling_ms(), &last_policy_check);
         }
 
         if (status == CV_OK) {
@@ -704,6 +1028,13 @@ static int run_server(const cli_options *options) {
      * service never acknowledges further work; persistence still closes/joins
      * outstanding snapshot jobs even when graceful checkpointing is skipped. */
     cv_console_restore(&previous);
+
+#ifndef _WIN32
+    if (reload_installed) {
+        (void)sigaction(SIGHUP, &reload_previous, NULL);
+    }
+#endif
+
     cv_server_destroy(server);
 
     if (store && status == CV_OK) {

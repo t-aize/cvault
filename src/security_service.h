@@ -17,6 +17,10 @@
  *    loop briefly; a global gate admits at most four verifications per second.
  *  - Three failed AUTH attempts on one connection close it.
  *  - An audit failure poisons the service; the owner must stop the server loop.
+ *  - The policy can be replaced while serving (cv_security_reload_policy()); every
+ *    session is then revoked and must authenticate again.
+ *  - The audit log can be sealed and continued in a new file once it grows past a
+ *    size (cv_security_rotate_audit()).
  */
 
 #ifndef CVAULT_SECURITY_SERVICE_H
@@ -31,8 +35,8 @@ typedef struct cv_security cv_security;
 /**
  * @brief Load the configuration, authenticate the audit history, record START.
  *
- * Call it before binding the listening socket. The paths are only used during
- * this call.
+ * Call it before binding the listening socket. The audit paths are only used
+ * during this call; the policy path is remembered for reloading.
  *
  * @param policy    Path of the policy file (users and prefix rules).
  * @param audit     Path of the encrypted audit log; created when missing.
@@ -99,6 +103,55 @@ void cv_security_disconnect(void *context, uint64_t id);
  *         service, or a storage/clock error.
  */
 cv_status cv_security_purge_expired(cv_security *security, size_t *removed);
+
+/**
+ * @brief Re-read the policy file and, if it is valid, switch to it.
+ *
+ * On success every session is revoked, because sessions belong to the policy that
+ * authenticated them: clients must send AUTH again and receive only the grants of
+ * the new policy. A policy that cannot be loaded changes nothing and keeps serving
+ * the previous one. Either outcome is recorded as a RELOAD event in the audit log,
+ * and the failed file is not retried until it changes again.
+ *
+ * @param security Service to reload.
+ * @return #CV_OK when the new policy is active; the loader's error (for example
+ *         #CV_ERR_CORRUPT) when it was rejected and the old policy stays; or the
+ *         fatal error that poisoned the service (an audit failure).
+ */
+cv_status cv_security_reload_policy(cv_security *security);
+
+/**
+ * @brief Reload the policy only if the file changed since it was last read.
+ *
+ * Cheap enough to call on a timer: it compares the file's modification time, size
+ * and identity before reading anything.
+ *
+ * @param security Service to check.
+ * @param reloaded Receives true when a new policy was loaded and applied.
+ * @return Same as cv_security_reload_policy(); #CV_OK with @p reloaded false when
+ *         nothing changed.
+ */
+cv_status cv_security_reload_policy_if_changed(cv_security *security, bool *reloaded);
+
+/**
+ * @brief Seal and continue the audit log once it reaches @p max_bytes.
+ *
+ * Meant to be called between requests, on the owner thread. After a rotation
+ * attempt that fails for a reason that leaves the log intact (for example an
+ * archive name that is already taken), further attempts are skipped for the rest
+ * of the run so the log is not flooded with intent events; the error is returned
+ * once.
+ *
+ * @param security  Service whose audit log is rotated.
+ * @param max_bytes Size threshold; zero disables rotation.
+ * @param archive   Optional buffer that receives the archive path when a rotation
+ *                  happened and is empty otherwise.
+ * @param capacity  Size of @p archive.
+ * @return #CV_OK; the error of a failed rotation that left the log usable; or the
+ *         fatal error that poisoned the service.
+ */
+cv_status
+cv_security_rotate_audit(cv_security *security, uint64_t max_bytes, char *archive, size_t capacity);
 
 /**
  * @brief Report whether the service is still healthy.

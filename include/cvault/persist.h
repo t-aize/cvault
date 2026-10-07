@@ -217,6 +217,43 @@ cv_status cv_persist_snapshot_wait(cv_persist *store);
 cv_status cv_persist_close(cv_persist *store);
 
 /**
+ * @brief Re-encrypt a data directory under a new key (offline).
+ *
+ * The store is opened with the old key (which authenticates all of its history),
+ * its live state is written as a snapshot plus an empty journal under the new key
+ * into a sibling directory `<directory>.rekey`, that copy is reopened and compared
+ * with the original, and only then are the directories swapped: the old one is
+ * renamed to `<directory>.rekey-old`, the new one takes its name, and the old one
+ * is deleted. Afterwards nothing under the old key remains in the file system
+ * (physical erasure from SSDs and backups cannot be promised).
+ *
+ * The new store gets a fresh identity and its sequence numbers restart at zero;
+ * expired entries are dropped and the journal history is not carried over, which
+ * also makes this a compaction. The directory is locked for the whole operation, so
+ * the server must be stopped.
+ *
+ * A crash before the swap leaves the original directory untouched and a stale
+ * `<directory>.rekey` that must be removed by hand before trying again. A crash
+ * between the two renames is completed by the next cv_persist_open(): the data
+ * directory is then missing, the verified copy is moved into place and the old
+ * directory is deleted.
+ *
+ * @param directory Data directory to rotate.
+ * @param old_key   Current 32-byte key.
+ * @param new_key   New 32-byte key; must differ from @p old_key.
+ * @return #CV_OK; #CV_ERR_INVALID_ARGUMENT (including equal keys); #CV_ERR_NOT_FOUND
+ *         (no such directory: a rotation never creates one); #CV_ERR_BUSY (the
+ *         directory is in use, or a `.rekey` / `.rekey-old` sibling exists);
+ *         #CV_ERR_CRYPTO (wrong old key); #CV_ERR_CORRUPT (the copy did not match
+ *         the original, nothing was swapped); #CV_ERR_IO, #CV_ERR_NO_MEMORY. An
+ *         #CV_ERR_IO after the swap means the old directory could not be deleted:
+ *         the rotation itself succeeded and `<directory>.rekey-old` must be removed.
+ */
+cv_status cv_persist_rotate_key(const char *directory,
+                                const unsigned char old_key[CV_PERSIST_KEY_BYTES],
+                                const unsigned char new_key[CV_PERSIST_KEY_BYTES]);
+
+/**
  * @brief Generate a new random key file; an existing file is never overwritten.
  *
  * POSIX creates the file with owner-only permissions; Windows uses a protected

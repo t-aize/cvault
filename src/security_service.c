@@ -29,6 +29,7 @@
 #include "cvault/audit.h"
 #include "cvault/crypto.h"
 #include "cvault/parser.h"
+#include "persist_io.h"
 #include "security_service.h"
 
 /** Failed AUTH attempts tolerated on one connection before it is closed. */
@@ -52,6 +53,10 @@ typedef struct {
 
 struct cv_security {
     cv_auth_policy *policy;      /**< Owned users and prefix rules. */
+    char *policy_path;           /**< Owned copy of the policy path, for reloading. */
+    cv_file_stamp policy_stamp;  /**< Stamp of the policy file as last read. */
+    bool stamped;                /**< Whether #policy_stamp is meaningful. */
+    bool rotation_blocked;       /**< A rotation failed non-fatally; do not retry. */
     cv_audit *audit;             /**< Owned encrypted audit log. */
     cv_hashtable *memory;        /**< Owned volatile table, used when no store is given. */
     cv_persist *store;           /**< Borrowed durable store, or NULL. */
@@ -136,6 +141,15 @@ cv_status cv_security_open(const char *policy,
     cv_status status = security->clients ? CV_OK : CV_ERR_NO_MEMORY;
 
     if (status == CV_OK) {
+        security->policy_path = malloc(strlen(policy) + 1);
+        status = security->policy_path ? CV_OK : CV_ERR_NO_MEMORY;
+    }
+
+    if (status == CV_OK) {
+        memcpy(security->policy_path, policy, strlen(policy) + 1);
+
+        /* Stamp first, then read: a change made in between triggers a reload later. */
+        security->stamped = cv_io_stamp(policy, &security->policy_stamp) == CV_OK;
         status = cv_auth_policy_load(policy, &security->policy);
     }
 
@@ -863,6 +877,129 @@ cv_status cv_security_purge_expired(cv_security *security, size_t *removed) {
                            : cv_hashtable_purge_expired(security->memory, removed);
 }
 
+/**
+ * @brief Revoke every session so none outlives the policy that authenticated it.
+ *
+ * Sessions borrow the policy and index into it, so they must be cleared before
+ * the policy is destroyed. The failure counters are kept, so replacing the
+ * policy does not give a connection fresh AUTH attempts.
+ */
+static void revoke_sessions(cv_security *security) {
+    for (size_t i = 0; i < security->capacity; ++i) {
+        if (security->clients[i].id) {
+            cv_auth_session_init(&security->clients[i].session);
+        }
+    }
+}
+
+cv_status cv_security_reload_policy(cv_security *security) {
+    if (!security) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (security->failure != CV_OK) {
+        return security->failure;
+    }
+
+    cv_file_stamp stamp;
+    bool stamped = cv_io_stamp(security->policy_path, &stamp) == CV_OK;
+    cv_auth_policy *fresh = NULL;
+    cv_status status = cv_auth_policy_load(security->policy_path, &fresh);
+
+    /* Remember the file as seen, even when it was rejected, so that a broken file is
+     * reported once instead of on every poll. */
+    security->policy_stamp = stamp;
+    security->stamped = stamped;
+
+    if (status == CV_OK) {
+        revoke_sessions(security);
+        cv_auth_policy_destroy(security->policy);
+
+        security->policy = fresh;
+    }
+
+    if (log_event(security, NULL, CV_AUDIT_RELOAD, CV_AUDIT_RESULT, status) != CV_OK) {
+        return security->failure;
+    }
+
+    return status;
+}
+
+cv_status cv_security_reload_policy_if_changed(cv_security *security, bool *reloaded) {
+    if (reloaded) {
+        *reloaded = false;
+    }
+
+    if (!security || !reloaded) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (security->failure != CV_OK) {
+        return security->failure;
+    }
+
+    cv_file_stamp stamp;
+
+    /* A file that cannot be examined right now (for example during an editor's
+     * save) is simply looked at again on the next call. */
+    if (cv_io_stamp(security->policy_path, &stamp) != CV_OK) {
+        return CV_OK;
+    }
+
+    if (security->stamped && memcmp(&stamp, &security->policy_stamp, sizeof(stamp)) == 0) {
+        return CV_OK;
+    }
+
+    cv_status status = cv_security_reload_policy(security);
+
+    *reloaded = status == CV_OK;
+
+    return status;
+}
+
+cv_status cv_security_rotate_audit(cv_security *security,
+                                   uint64_t max_bytes,
+                                   char *archive,
+                                   size_t capacity) {
+    if (archive && capacity) {
+        archive[0] = '\0';
+    }
+
+    if (!security || (archive && !capacity)) {
+        return CV_ERR_INVALID_ARGUMENT;
+    }
+
+    if (security->failure != CV_OK) {
+        return security->failure;
+    }
+
+    if (max_bytes == 0 || security->rotation_blocked) {
+        return CV_OK;
+    }
+
+    uint64_t size = 0;
+    cv_status status = cv_audit_size(security->audit, &size);
+
+    if (status == CV_OK && size < max_bytes) {
+        return CV_OK;
+    }
+
+    if (status == CV_OK) {
+        status = cv_audit_rotate(security->audit, NULL, archive, capacity);
+    }
+
+    if (status != CV_OK) {
+        /* A poisoned log is fatal for the service; any other failure left it intact. */
+        if (cv_audit_status(security->audit) != CV_OK) {
+            security->failure = status;
+        } else {
+            security->rotation_blocked = true;
+        }
+    }
+
+    return status;
+}
+
 cv_status cv_security_status(const cv_security *security) {
     return security ? security->failure : CV_OK;
 }
@@ -885,6 +1022,7 @@ cv_status cv_security_close(cv_security *security) {
 
     cv_auth_policy_destroy(security->policy);
     cv_hashtable_destroy(security->memory);
+    free(security->policy_path);
 
     if (security->clients) {
         cv_crypto_wipe(security->clients, security->capacity * sizeof(client));

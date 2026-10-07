@@ -626,6 +626,195 @@ class Persistence(unittest.TestCase):
             session.command("GET soon", "3")
             session.command("SWEEP", "0 0 2")
 
+    def new_key(self, name="new.key"):
+        """Generate and return a second key file."""
+        path = self.root / name
+
+        self.assertEqual(subprocess.run([ARGS.server, "--generate-key", str(path)], capture_output=True).returncode, 0)
+
+        return path
+
+    def rotate(self, new_key, old_key=None, directory=None):
+        """Run ``--rotate-data-key`` and return the completed process."""
+        return subprocess.run([ARGS.server, "--rotate-data-key", str(directory or self.data), "--key-file",
+                               str(old_key or self.key), "--new-key-file", str(new_key)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_key_rotation_reencrypts_everything_and_keeps_the_data(self):
+        """After a rotation only the new key opens the store; values and TTLs survive."""
+        now = int(time.time() * 1000)
+
+        with Session(self.data, self.key, now=now) as session:
+            session.command("SET private-key 0073656372657400ff", OK)
+            session.command("SET empty -", OK)
+            session.command("SET timed 74696d6564", OK)
+            session.command("EXPIRE timed 100000", OK)
+            session.command("SET deleted 01", OK)
+            session.command("SNAP", OK)
+            session.command("DEL deleted", OK)
+            session.command("SET tail 7461696c", OK)
+
+        old_journal = (self.data / "journal.aof").read_bytes()
+        new_key = self.new_key()
+        result = self.rotate(new_key)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("re-encrypted", result.stdout)
+
+        # No sibling directory is left behind, and nothing old remains in the data directory.
+        self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith("data")), ["data"])
+        self.assertEqual(sorted(path.name for path in self.data.iterdir()),
+                         ["journal.aof", "snapshot.cvs", "writer.lock"])
+        self.assertNotEqual((self.data / "journal.aof").read_bytes(), old_journal)
+
+        Session(self.data, self.key, now=now, expected=CRYPTO)
+
+        with Session(self.data, new_key, now=now) as session:
+            session.command("GET private-key", "0 0073656372657400ff")
+            session.command("GET empty", "0")
+            session.command("GET timed", "0 74696d6564")
+            session.command("GET deleted", "3")
+            session.command("GET tail", "0 7461696c")
+
+            self.assertGreaterEqual(int(session.command("TTL timed").split()[1]), 99000)
+
+            # The rotated store accepts new writes and survives another restart.
+            session.command("SET more 6d6f7265", OK)
+
+        with Session(self.data, new_key, now=now) as session:
+            session.command("GET more", "0 6d6f7265")
+            session.command("GET tail", "0 7461696c")
+
+    def test_key_rotation_drops_the_old_journal_history(self):
+        """Overwritten and deleted values do not appear in the rotated files."""
+        with Session(self.data, self.key) as session:
+            for index in range(40):
+                session.command("SET churn " + f"{index:02x}" * 16, OK)
+
+            session.command("SET final 66696e616c", OK)
+
+        before = (self.data / "journal.aof").stat().st_size
+        new_key = self.new_key()
+
+        self.assertEqual(self.rotate(new_key).returncode, 0)
+
+        # The rotated state is one snapshot and an empty journal (header only).
+        self.assertEqual((self.data / "journal.aof").stat().st_size, 72)
+        self.assertLess((self.data / "snapshot.cvs").stat().st_size, before // 4)
+
+        with Session(self.data, new_key) as session:
+            session.command("STATS", "0 0 0 0 0")
+            session.command("GET churn", "0 " + "27" * 16)
+            session.command("GET final", "0 66696e616c")
+
+    def test_key_rotation_failures_change_nothing(self):
+        """Wrong old key, equal keys and leftover siblings are refused without touching the data."""
+        self.seed(True)
+
+        snapshot = (self.data / "snapshot.cvs").read_bytes()
+        journal = (self.data / "journal.aof").read_bytes()
+        new_key = self.new_key()
+        other_key = self.new_key("other.key")
+
+        def unchanged():
+            self.assertEqual((self.data / "snapshot.cvs").read_bytes(), snapshot)
+            self.assertEqual((self.data / "journal.aof").read_bytes(), journal)
+            self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith("data")), ["data"])
+
+        # Wrong current key: authentication fails and the staging directory is not created.
+        self.assertNotEqual(self.rotate(new_key, old_key=other_key).returncode, 0)
+        unchanged()
+
+        # Identical keys are pointless and refused.
+        self.assertNotEqual(self.rotate(self.key, old_key=self.key).returncode, 0)
+        unchanged()
+
+        # A missing directory is not created by a rotation.
+        self.assertNotEqual(self.rotate(new_key, directory=self.root / "missing").returncode, 0)
+        self.assertFalse((self.root / "missing").exists())
+
+        # Leftovers of an earlier attempt need a human decision.
+        for leftover in ("data.rekey", "data.rekey-old"):
+            (self.root / leftover).mkdir()
+
+            result = self.rotate(new_key)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("rekey", result.stderr)
+
+            (self.root / leftover).rmdir()
+
+        # The original is still fully usable with its own key.
+        with Session(self.data, self.key) as session:
+            session.command("GET tail", "0 7461696c")
+
+    def test_key_rotation_needs_the_directory_lock(self):
+        """A running store keeps its lock, so a rotation cannot race with it."""
+        self.seed()
+
+        new_key = self.new_key()
+
+        with Session(self.data, self.key) as session:
+            result = self.rotate(new_key)
+
+            self.assertNotEqual(result.returncode, 0)
+
+            session.command("GET tail", "0 7461696c")
+
+        self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith("data")), ["data"])
+
+    def test_interrupted_key_rotation_is_completed_on_open(self):
+        """A crash between the two renames leaves no data directory; opening finishes the swap."""
+        self.seed(True)
+
+        new_key = self.new_key()
+        original = self.root / "original"
+
+        shutil.copytree(self.data, original)
+
+        self.assertEqual(self.rotate(new_key).returncode, 0)
+
+        # Reproduce the crash window: the rotated copy still has its staging name and
+        # the old directory its backup name, while the data directory is gone.
+        self.data.rename(self.root / "data.rekey")
+        original.rename(self.root / "data.rekey-old")
+
+        with Session(self.data, new_key) as session:
+            session.command("GET private-key", "0 0073656372657400ff")
+            session.command("GET tail", "0 7461696c")
+
+        self.assertFalse((self.root / "data.rekey").exists())
+        self.assertFalse((self.root / "data.rekey-old").exists())
+
+    def test_missing_directory_without_a_rotation_still_starts_empty(self):
+        """Only the exact interrupted-rotation state is recognised; a fresh directory stays empty."""
+        with Session(self.data, self.key) as session:
+            session.command("GET anything", "3")
+
+        # A lone staging directory (crash before the swap) must not replace anything.
+        shutil.rmtree(self.data)
+        (self.root / "data.rekey").mkdir()
+
+        with Session(self.data, self.key) as session:
+            session.command("STATS", "0 0 0 0 0")
+
+        self.assertTrue((self.root / "data.rekey").exists())
+
+    def test_rotation_option_validation(self):
+        """The rotation command needs both key files and stands alone."""
+        for options in (["--rotate-data-key", str(self.data)],
+                        ["--rotate-data-key", str(self.data), "--key-file", str(self.key)],
+                        ["--rotate-data-key", str(self.data), "--new-key-file", str(self.key)],
+                        ["--rotate-data-key", str(self.data), "--key-file", str(self.key),
+                         "--new-key-file", str(self.key), "--port", "0"],
+                        ["--rotate-data-key", str(self.data), "--key-file", str(self.key),
+                         "--new-key-file", str(self.key), "--generate-key", str(self.root / "x")],
+                        ["--new-key-file", str(self.key)]):
+            with self.subTest(options=options):
+                result = subprocess.run([ARGS.server, *options], capture_output=True, timeout=5)
+
+                self.assertNotEqual(result.returncode, 0)
+
     def test_orphan_temporary_files_are_ignored(self):
         """Leftover snapshot temporary files from a crash do not affect recovery."""
         self.seed()
