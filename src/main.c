@@ -42,12 +42,8 @@
 #include "cvault/persist.h"
 #include "cvault/server.h"
 #include "cvault/version.h"
+#include "secret_input.h"
 #include "security_service.h"
-
-#ifndef _WIN32
-#include <termios.h>
-#include <unistd.h>
-#endif
 
 /** Set by the signal handler; polled by the main loop and by password input. */
 static volatile sig_atomic_t stop_requested = 0;
@@ -407,83 +403,14 @@ static bool build_settings(const cli_options *options, server_settings *settings
  */
 static int hash_password(void) {
     unsigned char password[CV_AUTH_PASSWORD_BYTES + 2] = {0};
-    bool terminal = false;
-
-    /* Turn terminal echo off so the password is not displayed while typed. */
-#ifdef _WIN32
-    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
-
-    terminal = GetConsoleMode(input, &mode) != 0;
-
-    if (terminal && !SetConsoleMode(input, mode & ~ENABLE_ECHO_INPUT)) {
-        return EXIT_FAILURE;
-    }
-#else
-    struct termios previous;
-
-    terminal = isatty(STDIN_FILENO) != 0;
-
-    if (terminal) {
-        if (tcgetattr(STDIN_FILENO, &previous) != 0) {
-            return EXIT_FAILURE;
-        }
-
-        struct termios hidden = previous;
-
-        hidden.c_lflag &= (tcflag_t)~ECHO;
-
-        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) != 0) {
-            return EXIT_FAILURE;
-        }
-    }
-#endif
-
-    if (terminal) {
-        fputs("Password: ", stderr);
-        fflush(stderr);
-    }
-
-    /* Read one line; NUL bytes and over-long input make the password invalid. */
     size_t length = 0;
-    int c;
-    bool valid = true;
-
-    while (!stop_requested && (c = fgetc(stdin)) != EOF && c != '\n') {
-        if (c == 0 || length == sizeof(password)) {
-            valid = false;
-            break;
-        }
-
-        password[length++] = (unsigned char)c;
-    }
-
-    if (ferror(stdin) || stop_requested) {
-        valid = false;
-    }
-
-    if (length && password[length - 1] == '\r') {
-        --length;
-    }
-
-    /* Restore the terminal before doing anything else. */
-#ifdef _WIN32
-    if (terminal && !SetConsoleMode(input, mode)) {
-        valid = false;
-    }
-#else
-    if (terminal && tcsetattr(STDIN_FILENO, TCSAFLUSH, &previous) != 0) {
-        valid = false;
-    }
-#endif
-
-    if (terminal) {
-        fputc('\n', stderr);
-    }
-
     char hash[CV_AUTH_HASH_BYTES];
     cv_status status =
-        valid ? cv_auth_hash_password(password, length, hash) : CV_ERR_INVALID_ARGUMENT;
+        cv_secret_read("Password: ", password, sizeof(password), &length, &stop_requested);
+
+    if (status == CV_OK) {
+        status = cv_auth_hash_password(password, length, hash);
+    }
 
     cv_crypto_wipe(password, sizeof(password));
 

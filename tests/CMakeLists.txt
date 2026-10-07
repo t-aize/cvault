@@ -126,6 +126,12 @@ if(Python3_Interpreter_FOUND)
             --fixture "$<TARGET_FILE:cvault-security-fixture>")
     set_tests_properties(security PROPERTIES TIMEOUT 120)
 
+    add_test(NAME cli
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py"
+            --server "$<TARGET_FILE:cvault-server>"
+            --cli "$<TARGET_FILE:cvault-cli>")
+    set_tests_properties(cli PROPERTIES TIMEOUT 120)
+
     add_test(NAME bootstrap_download
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_bootstrap.py")
     set_tests_properties(bootstrap_download PROPERTIES TIMEOUT 15)
@@ -167,14 +173,6 @@ add_test(NAME server_help COMMAND cvault-server --help)
 add_test(NAME cli_help COMMAND cvault-cli --help)
 
 set_tests_properties(server_help PROPERTIES PASS_REGULAR_EXPRESSION "TCP transport")
-set_tests_properties(cli_help PROPERTIES PASS_REGULAR_EXPRESSION "Project scaffold")
+set_tests_properties(cli_help PROPERTIES PASS_REGULAR_EXPRESSION "Command-line client")
 
-# The scaffold CLI must fail explicitly instead of pretending to work.
-foreach(program IN ITEMS cvault-cli)
-    add_test(NAME "${program}_scaffold_guard"
-        COMMAND "${CMAKE_COMMAND}" "-DEXECUTABLE=$<TARGET_FILE:${program}>"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_scaffold.cmake")
-endforeach()
-
-set_tests_properties(core_smoke sodium_dependency server_help cli_help
-    cvault-cli_scaffold_guard PROPERTIES TIMEOUT 10)
+set_tests_properties(core_smoke sodium_dependency server_help cli_help PROPERTIES TIMEOUT 10)

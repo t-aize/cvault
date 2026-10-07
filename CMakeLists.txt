@@ -77,6 +77,7 @@ add_library(cvault_core STATIC
     src/persist.c
     src/persist_codec.c
     src/persist_io.c
+    src/secret_input.c
     src/audit.c
     src/security_service.c
     src/server.c)
@@ -98,6 +99,7 @@ target_link_libraries(cvault-server PRIVATE cvault_core cvault_argparse cvault_o
 cvault_copy_runtime(cvault-server)
 
 add_executable(cvault-cli client/main.c)
+target_include_directories(cvault-cli PRIVATE src)
 target_link_libraries(cvault-cli PRIVATE cvault_core cvault_argparse cvault_options)
 cvault_copy_runtime(cvault-cli)
 
