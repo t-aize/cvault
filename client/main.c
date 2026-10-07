@@ -35,6 +35,7 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <fcntl.h>
 #include <io.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -1143,6 +1144,11 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
     }
+
+#ifdef _WIN32
+    /* Values are binary: the C runtime must not turn LF into CR LF on output. */
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
 
     if (!network_start()) {
         fputs("cvault-cli: cannot initialise networking\n", stderr);

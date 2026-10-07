@@ -303,10 +303,7 @@ class Cli(unittest.TestCase):
 
                 time.sleep(1.5)
 
-                process.stdin.write(b"GET app/idle\n")
-                process.stdin.close()
-
-                stdout, stderr = process.communicate(timeout=30)
+                stdout, stderr = process.communicate(input=b"GET app/idle\n", timeout=30)
             finally:
                 process.kill()
                 process.wait()

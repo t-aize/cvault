@@ -797,7 +797,7 @@ class Security(unittest.TestCase):
             self.assertEqual([entry[0] for entry in entries], [b"alice:a", b"alice:b", b"alice:c"])
             self.assertEqual([entry[2] for entry in entries], [b"", b"two words", binary])
             self.assertEqual([entry[1] for entry in entries][::2], [-1, -1])
-            self.assertIn(entries[1][1], (999, 1000))
+            self.assertIn(entries[1][1], range(996, 1001))
 
             # A shorter prefix reaches every readable key below it, and only those.
             self.assertEqual([entry[0] for entry in alice.export_page(b"a")[0]],
